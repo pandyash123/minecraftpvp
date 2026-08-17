@@ -1,0 +1,1980 @@
+/*
+ * Minecraft-style kit PvP — authoritative game server.
+ *
+ *   node server.js            -> http://localhost:3000
+ *   PORT=8080 BOTS=6 node server.js
+ *
+ * Movement is client simulated (for responsiveness) but combat, projectiles,
+ * health, deaths and the world itself are owned by this process.
+ */
+'use strict';
+
+const path = require('path');
+const http = require('http');
+const express = require('express');
+const { Server } = require('socket.io');
+
+const MC = require('./shared/blocks.js');
+const WorldGen = require('./shared/worldgen.js');
+const Physics = require('./shared/physics.js');
+
+const W = MC.WORLD;
+const ID = MC.ID;
+const C = MC.COMBAT;
+
+const PORT = process.env.PORT || 3000;
+const SEED = process.env.SEED ? parseInt(process.env.SEED, 10) : 20260726;
+const BOT_COUNT = process.env.BOTS !== undefined ? parseInt(process.env.BOTS, 10) : 4;
+const TICK_HZ = 30;
+const SNAPSHOT_HZ = 20;
+
+const DIFFICULTY = {
+  easy: { skillMin: 0.10, skillMax: 0.22 },
+  normal: { skillMin: 0.40, skillMax: 0.60 },
+  hard: { skillMin: 0.78, skillMax: 0.95 },
+  random: { skillMin: 0.15, skillMax: 0.95 }
+};
+let defaultDifficulty = DIFFICULTY[process.env.DIFFICULTY] ? process.env.DIFFICULTY : 'normal';
+function rollSkill(diffKey) {
+  const d = DIFFICULTY[diffKey] || DIFFICULTY[defaultDifficulty];
+  return rand(d.skillMin, d.skillMax);
+}
+
+// Difficulty already governs aim/reaction/aggression via skill (above) - this
+// additionally scales the raw damage a bot deals, so "Easy" bots genuinely
+// hit softer and "Hard" bots genuinely hit harder, not just less/more often.
+const DIFFICULTY_DAMAGE_MULT = { easy: 0.6, normal: 1.0, hard: 1.5, random: 1.0 };
+function botDamageMult(bot) { return DIFFICULTY_DAMAGE_MULT[bot.difficulty] || 1; }
+
+// Even without an axe, a bot that keeps landing blocked hits on the same
+// target eventually breaks their shield - fewer hits needed at higher
+// difficulty. Tracked per-attacker (blockStreak/blockStreakVictim on the
+// bot), reset whenever a hit against them lands unblocked or they switch
+// who they're hitting.
+const BOT_SHIELD_BREAK_HITS = { easy: 3, normal: 2, hard: 1, random: 2 };
+
+// Global "gang up" toggle (see /botteam, or the menu checkbox) - when on,
+// bots only ever consider the human player(s) a valid target, never each
+// other, so the whole squad fights you instead of each other.
+let botsCooperate = false;
+
+// How much of their kit bots actually use in a fight, chosen at the menu or
+// via /botweapon / the 5th /bots argument:
+//   fixed     - one melee weapon (sword or axe) for life, plus bow + shield
+//               at their usual ranges. This is the original bot behaviour.
+//   versatile - periodically re-rolls between sword/axe, plus bow + shield,
+//               and eats a golden apple to heal when hurt.
+//   full      - everything versatile does, plus occasionally drops a cobweb
+//               near the player to slow them down. Never places building
+//               blocks (cobble/planks).
+const WEAPON_MODES = ['fixed', 'versatile', 'full'];
+let defaultBotWeaponMode = WEAPON_MODES.includes(process.env.WEAPONMODE) ? process.env.WEAPONMODE : 'fixed';
+
+// Bots each pick an armor tier (see MC.ARMOR_TIERS) instead of always
+// matching the human player's fixed diamond kit - chosen at the menu or via
+// /botarmor, defaulting to the same full diamond+Protection IV as the player.
+let defaultBotArmor = MC.ARMOR_TIERS[process.env.ARMOR] ? process.env.ARMOR : 'diamond';
+
+// Which ruleset (see MC.KITS) bots draw their loadout from - chosen at the
+// menu or via /botkit, independent of the human player's own /kit choice.
+let defaultBotKit = MC.KITS[process.env.KIT] ? process.env.KIT : 'web';
+
+// Bots always fight with fixed numbers, independent of whatever the human
+// player's own sword/axe currently is - otherwise buffing the player's
+// weapon would silently buff every bot too. Each bot is dealt one of these
+// at random (axe only if their kit includes it) so you can see (and fight)
+// both - `slot` is the ITEMS index the bot reports so remote clients render
+// the right item in its hand.
+const BOT_WEAPONS = {
+  sword: { key: 'sword', slot: 0, damage: 6, cooldown: 0.42 },
+  axe: { key: 'axe', slot: 8, damage: 9, cooldown: 0.9 }
+};
+function pickBotWeapon(kit) {
+  if (!MC.kitHasItem(kit, 'axe')) return 'sword';
+  return Math.random() < 0.65 ? 'sword' : 'axe';
+}
+
+// ---------------------------------------------------------------- world ---
+const blocks = WorldGen.generate(SEED);
+const spawns = WorldGen.spawnPoints(blocks, SEED);
+/** index -> blockId, every edit made since the server booted */
+const edits = new Map();
+
+/**
+ * Regenerates the pristine arena (same seed, so it's identical to what the
+ * server booted with) and forgets every placed/broken block since. Called
+ * when a lone player rejoins - typically just clicking "Play" again after a
+ * refresh - so they don't come back to a map cluttered with their last
+ * session's cobble towers. Never called while anyone else is still playing.
+ */
+function resetWorld() {
+  blocks.set(WorldGen.generate(SEED));
+  edits.clear();
+}
+
+function inBounds(x, y, z) {
+  return x >= 0 && y >= 0 && z >= 0 && x < W.SX && y < W.SY && z < W.SZ;
+}
+function getBlock(x, y, z) {
+  x |= 0; y |= 0; z |= 0;
+  if (!inBounds(x, y, z)) return y < 0 ? ID.BEDROCK : ID.AIR;
+  return blocks[(y * W.SZ + z) * W.SX + x];
+}
+function setBlock(x, y, z, id) {
+  if (!inBounds(x, y, z)) return false;
+  const i = (y * W.SZ + z) * W.SX + x;
+  if (blocks[i] === id) return false;
+  blocks[i] = id;
+  edits.set(i, id);
+  return true;
+}
+
+// -------------------------------------------------------------- helpers ---
+const players = new Map(); // id -> player
+let projectiles = [];
+let nextProjectileId = 1;
+let nextBotId = 1;
+// Placed-and-lit TNT/TNT Minecart blocks, counting down to their explosion -
+// see the 'ignite' handler and the fuse check in tick().
+let liveTNT = [];
+// Temporary burning patches lit by flint and steel on non-TNT ground - see
+// lightGroundFire()/igniteTNTBlock() and the tick() checks that use them.
+let groundFires = [];
+// Bounded flood-fill queue for water/lava spread - see the LIQUID_SPREAD_*
+// tick and the seed pushed in the 'setBlock' handler.
+let liquidSpreadQueue = [];
+
+const BOT_NAMES = ['Steve', 'Alex', 'Herobrine', 'Notch', 'Zombie_Slayer', 'CreeperFan',
+  'DiamondSword', 'Enderman', 'PvP_God', 'BlockBuster', 'xX_Miner_Xx', 'RedstoneRick'];
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function rand(a, b) { return a + Math.random() * (b - a); }
+function pick(arr) { return arr[(Math.random() * arr.length) | 0]; }
+function now() { return Date.now() / 1000; }
+
+// -------------------------------------------------------------- weather ---
+// clear/rain/thunder, chosen on a timer and broadcast to everyone. Rain (and
+// thunder) is what lets Riptide fire outside of water, same as vanilla;
+// thunder is additionally required for Channeling to do anything.
+let weather = 'clear';
+let weatherUntil = now() + rand(C.WEATHER_CLEAR_SECONDS[0], C.WEATHER_CLEAR_SECONDS[1]);
+
+function rollWeather() {
+  const t = now();
+  if (weather === 'clear') {
+    weather = 'rain';
+    weatherUntil = t + rand(C.WEATHER_RAIN_SECONDS[0], C.WEATHER_RAIN_SECONDS[1]);
+    if (Math.random() < C.WEATHER_THUNDER_CHANCE) {
+      weather = 'thunder';
+      weatherUntil = t + rand(C.WEATHER_THUNDER_SECONDS[0], C.WEATHER_THUNDER_SECONDS[1]);
+    }
+  } else {
+    weather = 'clear';
+    weatherUntil = t + rand(C.WEATHER_CLEAR_SECONDS[0], C.WEATHER_CLEAR_SECONDS[1]);
+  }
+  io.emit('weather', { kind: weather });
+}
+
+function isWet(p) {
+  return weather !== 'clear' || isInWater(p);
+}
+
+function itemBySlot(slot) { return MC.ITEMS[clamp(slot | 0, 0, MC.ITEMS.length - 1)]; }
+
+// Single source of truth for max stack sizes: each ITEMS entry's `ammo`
+// field. Spawning/respawning gives a full stack of each.
+const ITEM_BY_KEY = {};
+for (const item of MC.ITEMS) ITEM_BY_KEY[item.key] = item;
+// blockId -> item key, for kit-gating what can actually be placed.
+const BLOCK_ITEM_KEY = {};
+for (const item of MC.ITEMS) if (item.type === 'block') BLOCK_ITEM_KEY[item.block] = item.key;
+// Every potion key, for the per-kill restock in kill() below.
+const POTION_KEYS = MC.ITEMS.filter(i => i.type === 'potion').map(i => i.key);
+
+function freshAmmo() {
+  return {
+    arrow: C.ARROW_AMMO, pearl: ITEM_BY_KEY.pearl.ammo, gapple: ITEM_BY_KEY.gapple.ammo, windcharge: ITEM_BY_KEY.windcharge.ammo,
+    pot_strength: ITEM_BY_KEY.pot_strength.ammo, pot_speed: ITEM_BY_KEY.pot_speed.ammo, pot_fireres: ITEM_BY_KEY.pot_fireres.ammo,
+    pot_turtle: ITEM_BY_KEY.pot_turtle.ammo, pot_health: ITEM_BY_KEY.pot_health.ammo, egap: ITEM_BY_KEY.egap.ammo,
+    water_bucket: ITEM_BY_KEY.water_bucket.ammo, lava_bucket: ITEM_BY_KEY.lava_bucket.ammo,
+    tnt: ITEM_BY_KEY.tnt.ammo, tnt_minecart: ITEM_BY_KEY.tnt_minecart.ammo
+  };
+}
+
+/** True if `p` is currently standing in water - Riptide (only triggers in
+ * water) and Impaling (bonus damage against a target in water). */
+function isInWater(p) {
+  return Physics.inWater(getBlock, p.x, p.y, p.z);
+}
+
+/** True if `p` is currently standing in a placed lava block - see the lava
+ * damage/ignite tick in tick(). Same body-position check Physics.inWater
+ * uses, just for the specific lava block id instead of any liquid. */
+function isInLava(p) {
+  return getBlock(Math.floor(p.x), Math.floor(p.y + 0.6), Math.floor(p.z)) === ID.LAVA;
+}
+
+/** True if `p`'s loadout grants item `key`: their own hand-picked custom
+ * list if they built one (see customItems, set at join), otherwise their
+ * chosen kit preset (see MC.KITS) - bots always use the latter. */
+function playerHasItem(p, key) {
+  return p.customItems ? p.customItems.has(key) : MC.kitHasItem(p.kit, key);
+}
+
+/** Deep-merges a client's enchantOpts payload over MC.defaultEnchantOpts(),
+ * keeping only real booleans for real (slot, key) pairs from ENCHANT_DEFS -
+ * anything else in a stale/tampered payload is silently ignored rather than
+ * trusted. */
+function mergeEnchantOpts(user) {
+  const out = MC.defaultEnchantOpts();
+  if (user) {
+    for (const slot in out) {
+      if (!user[slot]) continue;
+      for (const key in out[slot]) {
+        if (typeof user[slot][key] === 'boolean') out[slot][key] = user[slot][key];
+      }
+    }
+  }
+  return out;
+}
+
+/** Whether `p`'s enchant toggle `slot.key` is on - false for anything
+ * missing/malformed rather than throwing. */
+function hasEnchant(p, slot, key) {
+  return !!(p.enchants && p.enchants[slot] && p.enchants[slot][key]);
+}
+
+/** The item in `p`'s hotbar slot `slot`, or null if that slot is empty for
+ * their loadout - the single gate every use-an-item action
+ * (attack/shoot/place) goes through. */
+function itemForPlayer(p, slot) {
+  const item = itemBySlot(slot);
+  return playerHasItem(p, item.key) ? item : null;
+}
+
+function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts) {
+  const s = pick(spawns);
+  // A custom loadout is human-only, and only every key that's actually a
+  // real ITEMS entry - anything else (a stale/tampered client) is silently
+  // dropped rather than trusted.
+  const custom = !isBot && Array.isArray(customItems) && customItems.length
+    ? new Set(customItems.filter(k => ITEM_BY_KEY[k]))
+    : null;
+  return {
+    id, name: String(name || 'Player').slice(0, 16),
+    bot: !!isBot,
+    kit: MC.KITS[kit] ? kit : (isBot ? defaultBotKit : 'web'),
+    customItems: custom,
+    // The human player always wears the full diamond kit (see MC.ARMOR) -
+    // bots pick a tier (default: matches the player's). Every enchant
+    // toggle (armor/sword/axe/bow, see ENCHANT_DEFS) is human-only and
+    // opt-in via the menu; bots always get the defaults, applied in combat
+    // via hasEnchant().
+    armorTier: isBot ? (MC.ARMOR_TIERS[armorTier] ? armorTier : defaultBotArmor) : 'diamond',
+    enchants: isBot ? MC.defaultEnchantOpts() : mergeEnchantOpts(enchantOpts),
+    x: s[0], y: s[1], z: s[2],
+    vx: 0, vy: 0, vz: 0,
+    yaw: rand(-Math.PI, Math.PI), pitch: 0,
+    onGround: true, sneak: false, sprint: false, swinging: false, blocking: false, shieldStunUntil: 0,
+    blockStreak: 0, blockStreakVictim: null,
+    slot: 0,
+    health: C.MAX_HEALTH, absorption: 0, alive: true,
+    kills: 0, deaths: 0, streak: 0,
+    ammo: freshAmmo(),
+    effects: {},
+    burnUntil: 0, lastBurnTick: 0,
+    lastAttack: 0, lastPotionThrow: 0, lastDamage: -99, lastRegen: 0, lastEffectRegenTick: 0, tridentAvailableAt: 0, spawnAt: now(),
+    respawnAt: 0,
+    fallFrom: null,
+    lastSeen: now(),
+    // bot only
+    ai: isBot ? { target: null, jitter: Math.random() * 6.28, strafe: 1, nextStrafe: 0, nextShot: 0, wander: null } : null
+  };
+}
+
+function respawn(p) {
+  // A training dummy always returns to the exact spot it was placed at,
+  // rather than a random arena spawn - it's meant to be a fixed target.
+  const s = (p.dummy && p.home) ? [p.home.x, p.home.y, p.home.z] : pick(spawns);
+  p.x = s[0]; p.y = s[1]; p.z = s[2];
+  p.vx = p.vy = p.vz = 0;
+  p.health = C.MAX_HEALTH;
+  // A little buffed absorption shield on top of full health/ammo - eases you
+  // back into the fight instead of dropping you in exactly as fragile as
+  // when you died.
+  p.absorption = 4;
+  p.alive = true;
+  p.ammo = freshAmmo();
+  p.spawnAt = now();
+  p.lastDamage = -99;
+  p.fallFrom = null;
+  p.slot = 0;
+  p.blocking = false;
+  p.shieldStunUntil = 0;
+  p.blockStreak = 0;
+  p.blockStreakVictim = null;
+  // A clean slate each life, same as ammo/absorption above - potion buffs
+  // and debuffs (and burning) don't carry through death.
+  p.effects = {};
+  p.burnUntil = 0;
+  if (p.attackDummy) { p.retaliateWeapon = 'sword'; p.retaliateEnchants = null; }
+  if (p.socket) p.socket.emit('respawn', { x: p.x, y: p.y, z: p.z, health: p.health, absorption: p.absorption });
+  if (p.socket) p.socket.emit('effects', {});
+  io.emit('spawned', { id: p.id, x: p.x, y: p.y, z: p.z });
+}
+
+function publicPlayer(p) {
+  return {
+    id: p.id, name: p.name, bot: p.bot, dummy: !!p.dummy, atkDummy: !!p.attackDummy, difficulty: p.difficulty || null,
+    armor: p.armorTier, kit: p.kit,
+    x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
+    health: p.health, absorption: p.absorption, alive: p.alive,
+    slot: p.slot, sneak: p.sneak, sprint: p.sprint, blocking: p.blocking,
+    kills: p.kills, deaths: p.deaths, streak: p.streak
+  };
+}
+
+/** True if `attacker` is roughly in front of `victim` - horizontal facing
+ * (yaw) only. Deliberately NOT pitch-sensitive: real shield blocking doesn't
+ * require your crosshair to be precisely on the attacker, only that you're
+ * generally turned towards them, same as vanilla Minecraft. */
+function withinFOV(victim, attacker) {
+  const dx = attacker.x - victim.x, dz = attacker.z - victim.z;
+  const len = Math.hypot(dx, dz) || 1;
+  const fx = -Math.sin(victim.yaw), fz = -Math.cos(victim.yaw); // yaw 0 == -Z
+  return (dx / len) * fx + (dz / len) * fz > C.SHIELD_FOV_DOT;
+}
+
+/** A shield covers the torso, not the top or bottom of the hitbox - an
+ * attacker standing well above or below the victim gets a free headshot /
+ * leg shot through it regardless of where the victim is looking. */
+function isHeadOrLegShot(victim, attacker) {
+  return Math.abs(attacker.y - victim.y) > C.SHIELD_VERTICAL_TOLERANCE;
+}
+
+/** Would `victim`'s raised shield actually block a hit from `attacker` right
+ * now: not stunned, in FOV, and not a headshot/leg shot. */
+function shieldBlocks(victim, attacker, t) {
+  return victim.blocking && t > (victim.shieldStunUntil || 0) &&
+    withinFOV(victim, attacker) && !isHeadOrLegShot(victim, attacker);
+}
+
+function scoreboard() {
+  return [...players.values()]
+    .map(p => ({
+      id: p.id, name: p.name, bot: p.bot, dummy: !!p.dummy, atkDummy: !!p.attackDummy, difficulty: p.difficulty || null,
+      armor: p.armorTier,
+      kills: p.kills, deaths: p.deaths, streak: p.streak, alive: p.alive, ping: p.ping | 0
+    }))
+    .sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
+}
+
+function broadcastScores() { io.emit('scores', scoreboard()); }
+
+// -------------------------------------------------------------- effects ---
+/** `p.effects[kind]` if still running (lazily deleting it once it's
+ * expired), or null. `t` is the caller's own `now()` so every check in one
+ * tick agrees on the same instant. */
+function activeEffect(p, kind, t) {
+  const e = p.effects && p.effects[kind];
+  if (!e) return null;
+  if (e.until <= t) { delete p.effects[kind]; return null; }
+  return e;
+}
+
+/** Sets/refreshes `p` on fire for COMBAT.BURN_SECONDS (Fire Aspect/Flame) -
+ * a fresh ignite always resets the full duration rather than stacking.
+ * Doesn't check Fire Resistance itself; that's checked once per tick where
+ * the burn damage is actually applied (see tick()), so a potion drunk
+ * *after* being ignited still stops the burn immediately. */
+function ignitePlayer(p, t) {
+  p.burnUntil = t + C.BURN_SECONDS;
+}
+
+/** True if `p` currently has any timed potion effect running (not Instant
+ * Health, which is immediate and never occupies `p.effects`) - drives the
+ * swirling particle shown around a buffed/debuffed player (see
+ * sendSnapshot's flags bit and the client's per-player particle spawn). */
+function hasAnyEffect(p, t) {
+  return !!(activeEffect(p, 'strength', t) || activeEffect(p, 'speed', t) || activeEffect(p, 'slowness', t) ||
+    activeEffect(p, 'resistance', t) || activeEffect(p, 'fireResistance', t) || activeEffect(p, 'regeneration', t));
+}
+
+/** Applies a drunk potion's effect to `p`. Speed/Slowness and Strength/
+ * Resistance aren't mutually exclusive with each other, but a fresh Speed
+ * clears any lingering Slowness and vice versa (Turtle Master's own kit) -
+ * drinking one is meant to replace the other, not stack against it. */
+function applyPotionEffect(p, item, t) {
+  const dur = C.POTION_DURATION;
+  switch (item.potion) {
+    case 'strength': p.effects.strength = { level: item.level, until: t + dur }; break;
+    case 'speed': p.effects.speed = { level: item.level, until: t + dur }; delete p.effects.slowness; break;
+    case 'fireResistance': p.effects.fireResistance = { level: 1, until: t + dur }; break;
+    case 'turtleMaster': {
+      const tDur = C.TURTLE_MASTER_DURATION;
+      p.effects.slowness = { level: item.slowLevel, until: t + tDur };
+      p.effects.resistance = { level: item.resistLevel, until: t + tDur };
+      delete p.effects.speed;
+      break;
+    }
+    case 'instantHealth':
+      p.health = Math.min(C.MAX_HEALTH, p.health + item.heal);
+      io.emit('hp', { id: p.id, health: p.health, absorption: p.absorption });
+      break;
+  }
+}
+
+/** Every currently-running effect on `p`, as {level, remaining-seconds} -
+ * sent to the *drinker's own* client only (so its local movement physics can
+ * apply Speed/Slowness, and the HUD can show countdowns). Always a full
+ * snapshot, not a delta, so the client can just replace its local copy
+ * wholesale and never gets stuck with a stale entry the server already
+ * cleared (e.g. Speed overwriting Slowness). */
+function effectsSnapshot(p, t) {
+  const out = {};
+  for (const kind in p.effects) {
+    const e = activeEffect(p, kind, t);
+    if (e) out[kind] = { level: e.level, remaining: e.until - t };
+  }
+  return out;
+}
+
+// --------------------------------------------------------------- combat ---
+function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
+  if (!victim.alive || amount <= 0) return;
+  const t = now();
+  if (t - victim.spawnAt < C.SPAWN_PROTECT && source && source.id !== victim.id) return;
+
+  // The attack dummy mirrors back whatever melee weapon it was just hit
+  // with, *and* that weapon's own enchants (Sharpness/Knockback/Fire
+  // Aspect) - update this even if the hit ends up doing ~0 damage after
+  // armor. A bot attacker's own (default) enchants get copied too, not
+  // just a human's.
+  if (victim.attackDummy && (cause === 'sword' || cause === 'axe')) {
+    victim.retaliateWeapon = cause;
+    victim.retaliateEnchants = (source && source.enchants && source.enchants[cause]) ? Object.assign({}, source.enchants[cause]) : null;
+  }
+
+  let dmg = amount;
+  // Full diamond/Protection IV kit + a raised shield only apply to direct
+  // combat hits - fall, void and self-inflicted damage bypass armor, same
+  // as vanilla.
+  let blocked = false;
+  if (cause === 'sword' || cause === 'arrow' || cause === 'axe' || cause === 'mace' || cause === 'spear' || cause === 'trident' || cause === 'stick' || cause === 'tnt') {
+    // Protection IV is always-on for bots (their fixed ARMOR_TIERS entry) but
+    // an opt-in toggle for the human player (see enchants.armor.protection,
+    // set at join) - build an effective tier with that swapped in rather
+    // than touching ARMOR_TIERS.diamond itself.
+    let tier = MC.ARMOR_TIERS[victim.armorTier];
+    if (!victim.bot) tier = Object.assign({}, tier, { protLevel: hasEnchant(victim, 'armor', 'protection') ? tier.protLevel : 0 });
+    dmg = MC.reduceByArmor(dmg, tier);
+    const resist = activeEffect(victim, 'resistance', t);
+    if (resist) dmg *= (1 - Math.min(1, C.RESISTANCE_PCT_PER_LEVEL * resist.level));
+    const canBlock = !!source && source.id !== victim.id && shieldBlocks(victim, source, t);
+    if (canBlock) {
+      // The hit that breaks through still gets blocked normally - the
+      // punishment is disabling the shield afterward, not this hit itself.
+      dmg *= (1 - C.SHIELD_BLOCK);
+      blocked = true;
+      // An axe always breaks a shield it connects with, on the spot,
+      // whoever's swinging it. Bots additionally learn to wear a shield
+      // down with repeated blocked hits from ANY weapon, even without an
+      // axe - fewer hits needed the higher their difficulty.
+      let breaksShield = cause === 'axe';
+      if (!breaksShield && source.bot) {
+        if (source.blockStreakVictim !== victim.id) { source.blockStreak = 0; source.blockStreakVictim = victim.id; }
+        source.blockStreak = (source.blockStreak || 0) + 1;
+        if (source.blockStreak >= (BOT_SHIELD_BREAK_HITS[source.difficulty] || 2)) breaksShield = true;
+      }
+      if (breaksShield) {
+        victim.shieldStunUntil = t + C.AXE_STUN;
+        victim.blocking = false;
+        if (victim.socket) victim.socket.emit('shieldStun', { duration: C.AXE_STUN });
+        io.emit('effect', { kind: 'shieldbreak', x: victim.x, y: victim.y + 1.2, z: victim.z });
+        if (source.bot) source.blockStreak = 0;
+      }
+    } else if (source && source.bot) {
+      // A clean, unblocked hit resets the attrition count - it's about
+      // *consecutive* blocked hits.
+      source.blockStreak = 0;
+    }
+    dmg = Math.round(dmg * 10) / 10;
+  }
+  if (blocked) { kbX = 0; kbZ = 0; kbY = 0; }
+  if (dmg <= 0) {
+    if (blocked) io.emit('effect', { kind: 'block', x: victim.x, y: victim.y + 1.2, z: victim.z });
+    return;
+  }
+  if (victim.absorption > 0) {
+    const used = Math.min(victim.absorption, dmg);
+    victim.absorption -= used;
+    dmg -= used;
+  }
+  victim.health = Math.max(0, victim.health - dmg);
+  victim.lastDamage = t;
+  if (blocked) io.emit('effect', { kind: 'block', x: victim.x, y: victim.y + 1.2, z: victim.z });
+
+  const kb = { x: kbX || 0, y: kbY === undefined ? 0.42 : kbY, z: kbZ || 0 };
+  // Don't add upward knockback to a target that's already airborne: during a
+  // multi-attacker brawl, hits land faster than gravity can cancel the last
+  // launch, so repeatedly refreshing vy upward causes an unbounded climb
+  // (looks exactly like flying). Only pop targets that are on the ground.
+  if (!victim.onGround) kb.y = 0;
+  if (victim.socket) {
+    victim.socket.emit('hurt', {
+      health: victim.health, absorption: victim.absorption,
+      amount, by: source ? source.id : null, byName: source ? source.name : null,
+      cause, kb, blocked
+    });
+  } else if (victim.bot) {
+    victim.vx += kb.x * 6; victim.vz += kb.z * 6;
+    if (kb.y) victim.vy = Math.min(10, Math.max(victim.vy, kb.y * 9));
+  }
+  if (source && source.socket && source.id !== victim.id) {
+    source.socket.emit('hitmarker', { id: victim.id, amount, health: victim.health });
+  }
+  io.emit('hp', { id: victim.id, health: victim.health, absorption: victim.absorption });
+
+  // Thorns III: a chance to reflect part of a landed melee hit back at the
+  // attacker. Its own 'thorns' cause isn't in the armor-reduction list above
+  // (unarmored, magic-flavoured damage, same as vanilla) and never re-rolls
+  // itself, so this can't chain into an infinite loop even if both players
+  // have it on.
+  if (source && source.id !== victim.id && hasEnchant(victim, 'armor', 'thorns') &&
+      (cause === 'sword' || cause === 'axe' || cause === 'mace' || cause === 'spear' || cause === 'trident' || cause === 'stick') &&
+      Math.random() < C.THORNS_PROC_CHANCE) {
+    applyDamage(source, rand(C.THORNS_DMG_MIN, C.THORNS_DMG_MAX), victim, 'thorns', 0, 0, 0);
+  }
+
+  if (victim.health <= 0) kill(victim, source, cause);
+}
+
+function kill(victim, source, cause) {
+  victim.alive = false;
+  victim.deaths++;
+  victim.streak = 0;
+  victim.respawnAt = now() + (victim.dummy ? 1 : C.RESPAWN_TIME);
+  victim.vx = victim.vy = victim.vz = 0;
+  if (source && source.id !== victim.id) {
+    source.kills++;
+    source.streak++;
+    // reward: top up the killer a bit, classic kit-pvp style - applies to
+    // bots too, not just human players (kill() doesn't distinguish source.bot).
+    // Ammo restock is deliberately uncapped - every single kill adds half of
+    // a full stack, even past the amount you spawn with, so a kill streak
+    // can stockpile well beyond the default loadout (e.g. 100+ golden apples
+    // eventually). Health still caps at max, since more-than-full health
+    // isn't a meaningful reward.
+    // Looting III: a kill landed with the sword (and only the sword, same as
+    // vanilla's "the weapon that dealt the killing blow") multiplies the
+    // whole restock below - simulated as bonus ammo since this game has no
+    // physical item drops to multiply.
+    const lootMult = cause === 'sword' && hasEnchant(source, 'sword', 'looting') ? C.LOOTING_KILL_MULT : 1;
+    source.health = Math.min(C.MAX_HEALTH, source.health + 4);
+    source.ammo.arrow += Math.floor(C.ARROW_AMMO / 2) * lootMult;
+    source.ammo.pearl += Math.floor(ITEM_BY_KEY.pearl.ammo / 2) * lootMult;
+    source.ammo.gapple += Math.floor(ITEM_BY_KEY.gapple.ammo / 2) * lootMult;
+    source.ammo.windcharge += Math.floor(ITEM_BY_KEY.windcharge.ammo / 2) * lootMult;
+    // Every potion in the killer's own loadout restocks a flat few, same
+    // "keep the fight going" idea as the ammo above - only for potions they
+    // actually have access to, not every potion that exists.
+    for (const key of POTION_KEYS) {
+      if (playerHasItem(source, key)) source.ammo[key] = (source.ammo[key] || 0) + C.POTION_KILL_RESTOCK * lootMult;
+    }
+    // Water/lava buckets and TNT/TNT Minecart restock the same "half a
+    // fresh stack" way as arrow/pearl/gapple/windcharge above, just gated on
+    // actually having them in the loadout (web-kit only, same as potions).
+    for (const key of ['water_bucket', 'lava_bucket', 'tnt', 'tnt_minecart']) {
+      if (playerHasItem(source, key)) source.ammo[key] = (source.ammo[key] || 0) + Math.floor(ITEM_BY_KEY[key].ammo / 2) * lootMult;
+    }
+    // Looting III also restocks a couple enchanted golden apples per kill -
+    // a smaller, flat amount rather than a half-stack, since egaps are meant
+    // to stay scarce even with the enchant active.
+    if (lootMult > 1 && playerHasItem(source, 'egap')) {
+      source.ammo.egap = (source.ammo.egap || 0) + Math.floor(rand(C.EGAP_LOOT_MIN, C.EGAP_LOOT_MAX + 1));
+    }
+    if (source.socket) source.socket.emit('killreward', { health: source.health, ammo: source.ammo, streak: source.streak });
+  }
+  io.emit('death', {
+    victim: victim.id, victimName: victim.name,
+    killer: source && source.id !== victim.id ? source.id : null,
+    killerName: source && source.id !== victim.id ? source.name : null,
+    cause, streak: source ? source.streak : 0
+  });
+  broadcastScores();
+}
+
+/** Ray vs player AABBs. Returns the closest hit player, or null. */
+function raycastPlayers(ox, oy, oz, dx, dy, dz, maxDist, exclude) {
+  let best = null, bestT = maxDist;
+  for (const p of players.values()) {
+    if (!p.alive || (exclude && p.id === exclude.id)) continue;
+    // Generous margin over the visual hitbox: a razor-thin collision box
+    // against a moving target plus real aiming/network latency makes arrows
+    // whiff constantly even when a shot looks like it should land.
+    const r = MC.PHYS.WIDTH / 2 + 0.35;
+    const hit = rayBox(ox, oy, oz, dx, dy, dz,
+      p.x - r, p.y, p.z - r, p.x + r, p.y + MC.PHYS.HEIGHT, p.z + r);
+    if (hit !== null && hit < bestT) { bestT = hit; best = p; }
+  }
+  return best ? { player: best, dist: bestT } : null;
+}
+
+function rayBox(ox, oy, oz, dx, dy, dz, x0, y0, z0, x1, y1, z1) {
+  let tmin = 0, tmax = Infinity;
+  const o = [ox, oy, oz], d = [dx, dy, dz];
+  const lo = [x0, y0, z0], hi = [x1, y1, z1];
+  for (let i = 0; i < 3; i++) {
+    if (Math.abs(d[i]) < 1e-8) {
+      if (o[i] < lo[i] || o[i] > hi[i]) return null;
+    } else {
+      let t1 = (lo[i] - o[i]) / d[i];
+      let t2 = (hi[i] - o[i]) / d[i];
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      tmin = Math.max(tmin, t1);
+      tmax = Math.min(tmax, t2);
+      if (tmin > tmax) return null;
+    }
+  }
+  return tmin;
+}
+
+function spawnProjectile(owner, kind, ox, oy, oz, dx, dy, dz, power, meta) {
+  const speed = kind === 'pearl' ? C.PEARL_SPEED : kind === 'windcharge' ? C.WINDCHARGE_SPEED : kind === 'potion' ? C.POTION_SPEED : C.ARROW_SPEED * (0.35 + 0.65 * power);
+  const pr = Object.assign({
+    id: nextProjectileId++,
+    kind, owner: owner.id,
+    x: ox, y: oy, z: oz,
+    vx: dx * speed, vy: dy * speed, vz: dz * speed,
+    power, born: now(), life: kind === 'pearl' ? 8 : kind === 'windcharge' ? 6 : kind === 'potion' ? 8 : 12
+  }, meta);
+  projectiles.push(pr);
+  // `meta` (currently just potionKey, for the client to tint the splash
+  // bottle the right colour) rides along on the spawn broadcast too.
+  io.emit('projectile', Object.assign({ id: pr.id, kind, x: pr.x, y: pr.y, z: pr.z, vx: pr.vx, vy: pr.vy, vz: pr.vz, owner: pr.owner }, meta));
+  return pr;
+}
+
+/** Wind charge + ender pearl combo: instead of exploding, a wind charge that
+ * touches a pearl still in flight instantly pulls its owner to that pearl's
+ * current position, consuming both projectiles. */
+function windchargePearlCombo(chargePr, pearlPr) {
+  const thrower = players.get(chargePr.owner);
+  if (thrower && thrower.alive) {
+    let ty = Math.floor(pearlPr.y);
+    for (let i = 0; i < 6; i++) {
+      if (!MC.SOLID[getBlock(Math.floor(pearlPr.x), ty, Math.floor(pearlPr.z))] &&
+          !MC.SOLID[getBlock(Math.floor(pearlPr.x), ty + 1, Math.floor(pearlPr.z))]) break;
+      ty++;
+    }
+    thrower.x = clamp(pearlPr.x, 1, W.SX - 1);
+    thrower.y = clamp(ty, 1, W.SY - 3);
+    thrower.z = clamp(pearlPr.z, 1, W.SZ - 1);
+    thrower.vx = thrower.vy = thrower.vz = 0;
+    thrower.fallFrom = null;
+    if (thrower.socket) thrower.socket.emit('teleport', { x: thrower.x, y: thrower.y, z: thrower.z });
+    io.emit('effect', { kind: 'pearl', x: thrower.x, y: thrower.y, z: thrower.z });
+  }
+  io.emit('projectileGone', { id: pearlPr.id });
+  io.emit('projectileGone', { id: chargePr.id, x: chargePr.x, y: chargePr.y, z: chargePr.z, hit: true });
+  pearlPr._consumed = true;
+}
+
+/** Wind charge explosion: no direct-hit damage worth mentioning, just a
+ * strong shove away from (and slightly up from) the impact point - vanilla's
+ * wind charge blast. Doesn't affect the thrower (they already got their
+ * guaranteed launch the instant they threw it, see the 'shoot' handler). */
+function explodeWindcharge(ownerId, x, y, z) {
+  const owner = players.get(ownerId) || null;
+  for (const p of players.values()) {
+    if (!p.alive || p.id === ownerId) continue;
+    const dx = p.x - x, dz = p.z - z, dy = (p.y + 0.9) - y;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist > C.WINDCHARGE_BLAST_RADIUS) continue;
+    const falloff = 1 - dist / C.WINDCHARGE_BLAST_RADIUS;
+    const l = Math.hypot(dx, dz) || 1;
+    const kbX = (dx / l) * falloff * C.WINDCHARGE_BLAST_KB;
+    const kbZ = (dz / l) * falloff * C.WINDCHARGE_BLAST_KB;
+    const kbY = 0.35 + falloff * 0.75;
+    applyDamage(p, 1, owner, 'windcharge', kbX, kbZ, kbY);
+  }
+  io.emit('effect', { kind: 'windburst', x, y, z });
+}
+
+/** TNT / TNT Minecart explosion: damages/knocks back every alive player in
+ * range (falloff by distance, same shape as the wind charge blast above)
+ * and clears blocks in a rough sphere - never bedrock, never past the
+ * world's edges. `ownerId` is whoever lit the fuse, purely for the kill
+ * feed/attribution; friendly fire applies same as every other weapon here. */
+function explodeTNT(x, y, z, radius, dmg, kb, ownerId) {
+  const owner = players.get(ownerId) || null;
+  for (const p of players.values()) {
+    if (!p.alive) continue;
+    const dx = p.x - x, dz = p.z - z, dy = (p.y + 0.9) - y;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist > radius) continue;
+    const falloff = 1 - dist / radius;
+    const l = Math.hypot(dx, dz) || 1;
+    const kbX = (dx / l) * falloff * kb;
+    const kbZ = (dz / l) * falloff * kb;
+    const kbY = 0.4 + falloff * 0.9;
+    applyDamage(p, Math.round(dmg * falloff), owner, 'tnt', kbX, kbZ, kbY);
+  }
+  const r = Math.ceil(radius);
+  const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
+  for (let by = -r; by <= r; by++) {
+    for (let bz = -r; bz <= r; bz++) {
+      for (let bx = -r; bx <= r; bx++) {
+        if (Math.hypot(bx, by, bz) > radius) continue;
+        const wx = cx + bx, wy = cy + by, wz = cz + bz;
+        if (!inBounds(wx, wy, wz)) continue;
+        const cur = getBlock(wx, wy, wz);
+        if (cur === ID.AIR || MC.HARDNESS[cur] < 0) continue;
+        if (setBlock(wx, wy, wz, ID.AIR)) io.emit('block', { x: wx, y: wy, z: wz, id: ID.AIR, by: ownerId });
+      }
+    }
+  }
+  io.emit('effect', { kind: 'explosion', x, y, z, radius });
+}
+
+/** Lights a placed TNT/TNT Minecart block's fuse - shared by the flint and
+ * steel 'ignite' handler and a landed Flame bow/burning arrow hit. No-op if
+ * that block isn't actually TNT, or is already lit. */
+function igniteTNTBlock(x, y, z, ownerId) {
+  const block = getBlock(x, y, z);
+  if (block !== ID.TNT && block !== ID.TNT_MINECART) return false;
+  if (liveTNT.some(t => t.x === x && t.y === y && t.z === z)) return false;
+  const minecart = block === ID.TNT_MINECART;
+  liveTNT.push({
+    x, y, z,
+    explodeAt: now() + (minecart ? C.TNT_MINECART_FUSE_SECONDS : C.TNT_FUSE_SECONDS),
+    radius: minecart ? C.TNT_MINECART_BLAST_RADIUS : C.TNT_BLAST_RADIUS,
+    dmg: minecart ? C.TNT_MINECART_BLAST_DMG : C.TNT_BLAST_DMG,
+    kb: minecart ? C.TNT_MINECART_BLAST_KB : C.TNT_BLAST_KB,
+    ownerId
+  });
+  io.emit('effect', { kind: 'fuse', x: x + 0.5, y: y + 1, z: z + 0.5 });
+  return true;
+}
+
+/** Flint and steel on anything that isn't TNT: a temporary burning patch in
+ * the empty space directly above that block - see the groundFires
+ * damage/ignite tick and the arrow burning check, both in
+ * tick()/stepProjectiles. `x,y,z` is the solid block that got hit; the fire
+ * itself lives one cell higher, where a player would actually stand in it. */
+function lightGroundFire(x, y, z) {
+  const fy = y + 1;
+  groundFires.push({ x, y: fy, z, until: now() + C.GROUND_FIRE_SECONDS });
+  io.emit('effect', { kind: 'groundfire', x: x + 0.5, y: fy + 0.2, z: z + 0.5, duration: C.GROUND_FIRE_SECONDS });
+}
+
+function stepProjectiles(dt) {
+  const g = { arrow: C.ARROW_GRAVITY, pearl: C.PEARL_GRAVITY, windcharge: C.WINDCHARGE_GRAVITY, potion: C.POTION_GRAVITY, trident: C.TRIDENT_GRAVITY };
+  const alive = [];
+  const t = now();
+  for (const pr of projectiles) {
+    if (pr._consumed) continue;
+    if (t - pr.born > pr.life) { io.emit('projectileGone', { id: pr.id }); continue; }
+    let removed = false;
+    const steps = 4;
+    const h = dt / steps;
+    for (let s = 0; s < steps && !removed; s++) {
+      pr.vy -= g[pr.kind] * h;
+      const nx = pr.x + pr.vx * h, ny = pr.y + pr.vy * h, nz = pr.z + pr.vz * h;
+      // An arrow that flies through a flint-and-steel ground fire catches
+      // fire itself - it'll ignite whatever it hits next, same as a Flame
+      // bow shot, regardless of whether the shooter actually has Flame on.
+      if (pr.kind === 'arrow' && !pr.burning && groundFires.length) {
+        const ax = Math.floor(nx), ay = Math.floor(ny), az = Math.floor(nz);
+        if (groundFires.some(f => f.x === ax && f.y === ay && f.z === az)) pr.burning = true;
+      }
+      // wind charge <-> ender pearl mid-air combo (checked before any other
+      // collision so a charge racing toward a pearl doesn't explode on
+      // terrain first)
+      if (pr.kind === 'windcharge') {
+        let combo = null;
+        for (const other of projectiles) {
+          if (other === pr || other._consumed || other.kind !== 'pearl') continue;
+          if (Math.hypot(nx - other.x, ny - other.y, nz - other.z) < C.WINDCHARGE_PEARL_COMBO_RADIUS) { combo = other; break; }
+        }
+        if (combo) { windchargePearlCombo(pr, combo); removed = true; break; }
+      }
+      // player hit
+      const len = Math.hypot(nx - pr.x, ny - pr.y, nz - pr.z);
+      if (len > 1e-6) {
+        const owner = players.get(pr.owner);
+        const hit = raycastPlayers(pr.x, pr.y, pr.z, (nx - pr.x) / len, (ny - pr.y) / len, (nz - pr.z) / len, len,
+          t - pr.born < 0.12 ? owner : null);
+        if (hit) {
+          if (pr.kind === 'arrow') {
+            // weaponKey distinguishes a plain bow shot from a crossbow bolt
+            // (see spawnProjectile's meta) - each uses its own damage range,
+            // and only the bow's own enchants (Power/Punch/Flame) apply to
+            // a bow shot specifically, not a crossbow bolt.
+            const weaponItem = ITEM_BY_KEY[pr.weaponKey] || MC.ITEMS[1];
+            const isBowShot = weaponItem.key === 'bow';
+            let dmg = weaponItem.minDamage + (weaponItem.maxDamage - weaponItem.minDamage) * pr.power;
+            if (isBowShot && owner && hasEnchant(owner, 'bow', 'power')) dmg += C.POWER_DMG_BONUS;
+            if (owner && owner.bot) dmg *= botDamageMult(owner);
+            const hx = pr.vx, hz = pr.vz;
+            const hl = Math.hypot(hx, hz) || 1;
+            let kbMul = 0.5;
+            if (isBowShot && owner && hasEnchant(owner, 'bow', 'punch')) kbMul += C.PUNCH_ENCHANT_ADD;
+            applyDamage(hit.player, Math.round(dmg), owner, 'arrow', (hx / hl) * kbMul, (hz / hl) * kbMul, 0.36);
+            if (pr.burning || (isBowShot && owner && hasEnchant(owner, 'bow', 'flame'))) ignitePlayer(hit.player, t);
+            if (owner && owner.socket) owner.socket.emit('arrowHit', { id: hit.player.id, dist: Math.hypot(hit.player.x - owner.x, hit.player.z - owner.z) });
+          } else if (pr.kind === 'pearl') {
+            teleportPearl(pr, nx, ny, nz);
+          } else if (pr.kind === 'potion') {
+            splashPotion(pr, nx, ny, nz);
+          } else if (pr.kind === 'trident') {
+            // Channeling only does anything during an active thunderstorm,
+            // same restriction as vanilla - a landed hit calls down a real
+            // lightning strike on top of the normal throw damage.
+            const channeling = owner && hasEnchant(owner, 'trident', 'channeling') && weather === 'thunder';
+            const dmg0 = C.TRIDENT_THROW_DAMAGE +
+              (owner && hasEnchant(owner, 'trident', 'impaling') && isInWater(hit.player) ? C.TRIDENT_IMPALING_BONUS_DMG : 0) +
+              (channeling ? C.LIGHTNING_BONUS_DMG : 0);
+            const kbMul = channeling ? C.TRIDENT_CHANNELING_KB : 0.6;
+            const hx = pr.vx, hz = pr.vz, hl = Math.hypot(hx, hz) || 1;
+            applyDamage(hit.player, dmg0, owner, 'trident', (hx / hl) * kbMul, (hz / hl) * kbMul, 0.5);
+            if (channeling) io.emit('effect', { kind: 'lightning', x: hit.player.x, y: hit.player.y + 1, z: hit.player.z });
+          } else {
+            explodeWindcharge(pr.owner, nx, ny, nz);
+          }
+          io.emit('projectileGone', { id: pr.id, x: nx, y: ny, z: nz, hit: true });
+          removed = true;
+          break;
+        }
+      }
+      // world hit
+      if (MC.SOLID[getBlock(Math.floor(nx), Math.floor(ny), Math.floor(nz))]) {
+        if (pr.kind === 'pearl') teleportPearl(pr, pr.x, pr.y, pr.z);
+        else if (pr.kind === 'windcharge') explodeWindcharge(pr.owner, pr.x, pr.y, pr.z);
+        else if (pr.kind === 'potion') splashPotion(pr, pr.x, pr.y, pr.z);
+        else if (pr.kind === 'arrow') {
+          // A Flame bow shot (or an arrow that flew through a ground fire)
+          // lands on TNT/TNT Minecart -> lights its fuse, same as flint and
+          // steel would.
+          const owner = players.get(pr.owner);
+          const weaponItem = ITEM_BY_KEY[pr.weaponKey] || MC.ITEMS[1];
+          const flameShot = pr.burning || (weaponItem.key === 'bow' && owner && hasEnchant(owner, 'bow', 'flame'));
+          if (flameShot) igniteTNTBlock(Math.floor(nx), Math.floor(ny), Math.floor(nz), pr.owner);
+        }
+        io.emit('projectileGone', { id: pr.id, x: pr.x, y: pr.y, z: pr.z, hit: true });
+        removed = true;
+        break;
+      }
+      if (nx < 0 || nz < 0 || nx > W.SX || nz > W.SZ || ny < 0 || ny > W.SY) {
+        io.emit('projectileGone', { id: pr.id });
+        removed = true;
+        break;
+      }
+      pr.x = nx; pr.y = ny; pr.z = nz;
+    }
+    if (!removed) alive.push(pr);
+  }
+  projectiles = alive.filter(p => !p._consumed);
+}
+
+/** Splash potion: applies its effect to every alive player within
+ * COMBAT.POTION_SPLASH_RADIUS of the impact point, thrower included - the
+ * only way to self-buff instantly is to throw one at your own feet. */
+function splashPotion(pr, x, y, z) {
+  const item = ITEM_BY_KEY[pr.potionKey];
+  if (!item) return;
+  const t = now();
+  for (const p of players.values()) {
+    if (!p.alive) continue;
+    const dist = Math.hypot(p.x - x, (p.y + 0.9) - y, p.z - z);
+    if (dist > C.POTION_SPLASH_RADIUS) continue;
+    applyPotionEffect(p, item, t);
+    if (p.socket) p.socket.emit('effects', effectsSnapshot(p, t));
+  }
+  io.emit('effect', { kind: 'drink', potionKey: pr.potionKey, x, y, z });
+}
+
+function teleportPearl(pr, x, y, z) {
+  const owner = players.get(pr.owner);
+  if (!owner || !owner.alive) return;
+  // find a safe standing spot near the impact
+  let ty = Math.floor(y);
+  for (let i = 0; i < 6; i++) {
+    if (!MC.SOLID[getBlock(Math.floor(x), ty, Math.floor(z))] &&
+        !MC.SOLID[getBlock(Math.floor(x), ty + 1, Math.floor(z))]) break;
+    ty++;
+  }
+  owner.x = clamp(x, 1, W.SX - 1);
+  owner.y = clamp(ty, 1, W.SY - 3);
+  owner.z = clamp(z, 1, W.SZ - 1);
+  owner.vx = owner.vy = owner.vz = 0;
+  owner.fallFrom = null;
+  if (owner.socket) owner.socket.emit('teleport', { x: owner.x, y: owner.y, z: owner.z });
+  applyDamage(owner, 2, null, 'pearl', 0, 0, 0);
+  io.emit('effect', { kind: 'pearl', x: owner.x, y: owner.y, z: owner.z });
+}
+
+// ------------------------------------------------------------------ bots ---
+function addBot(difficulty, armorTier, kit, weaponMode) {
+  const id = 'bot' + (nextBotId++);
+  const name = pick(BOT_NAMES) + (Math.random() < 0.5 ? '' : (10 + ((Math.random() * 89) | 0)));
+  const diff = DIFFICULTY[difficulty] ? difficulty : defaultDifficulty;
+  const armor = MC.ARMOR_TIERS[armorTier] ? armorTier : defaultBotArmor;
+  const botKit = MC.KITS[kit] ? kit : defaultBotKit;
+  const p = makePlayer(id, name, true, armor, botKit);
+  p.difficulty = diff;
+  p.skill = rollSkill(diff);
+  p.weaponMode = WEAPON_MODES.includes(weaponMode) ? weaponMode : defaultBotWeaponMode;
+  p.meleeWeapon = pickBotWeapon(p.kit);
+  p.slot = BOT_WEAPONS[p.meleeWeapon].slot;
+  players.set(id, p);
+  io.emit('playerJoin', publicPlayer(p));
+  broadcastScores();
+  return p;
+}
+
+function setBotDifficulty(bot, key) {
+  if (!DIFFICULTY[key]) return false;
+  bot.difficulty = key;
+  bot.skill = rollSkill(key);
+  return true;
+}
+
+function setBotArmor(bot, key) {
+  if (!MC.ARMOR_TIERS[key]) return false;
+  bot.armorTier = key;
+  return true;
+}
+
+function setBotKit(bot, key) {
+  if (!MC.KITS[key]) return false;
+  bot.kit = key;
+  // Drop a now-illegal axe back to the sword immediately, rather than
+  // waiting for its next melee swing to notice.
+  if (bot.meleeWeapon === 'axe' && !MC.kitHasItem(key, 'axe')) {
+    bot.meleeWeapon = 'sword';
+    bot.slot = BOT_WEAPONS.sword.slot;
+  }
+  return true;
+}
+
+function setBotWeaponMode(bot, key) {
+  if (!WEAPON_MODES.includes(key)) return false;
+  bot.weaponMode = key;
+  return true;
+}
+
+function removeBot() {
+  for (const p of players.values()) {
+    if (p.bot && !p.dummy) {
+      players.delete(p.id);
+      io.emit('playerLeave', { id: p.id });
+      broadcastScores();
+      return true;
+    }
+  }
+  return false;
+}
+
+// A stationary target that never moves or attacks - purely for testing that
+// hits/damage register. Always respawns at the exact spot it was placed.
+function addDummy(shieldEnabled) {
+  const id = 'dummy' + (nextBotId++);
+  const existing = [...players.values()].filter(p => p.dummy && !p.attackDummy).length;
+  const name = existing === 0 ? 'Training Dummy' : 'Training Dummy ' + (existing + 1);
+  // Full diamond/Protection IV like the player, so it actually soaks hits
+  // like a real opponent instead of dying to any old poke.
+  const p = makePlayer(id, name, true, 'diamond');
+  p.dummy = true;
+  p.difficulty = null;
+  p.home = { x: p.x, y: p.y, z: p.z };
+  // Holds a shield up by default - since a passive dummy's AI never runs,
+  // whatever we set here just stays put forever, no per-tick logic needed.
+  p.blocking = shieldEnabled !== false;
+  players.set(id, p);
+  io.emit('playerJoin', publicPlayer(p));
+  broadcastScores();
+  return p;
+}
+
+function removeDummy() {
+  for (const p of players.values()) {
+    if (p.dummy && !p.attackDummy) {
+      players.delete(p.id);
+      io.emit('playerLeave', { id: p.id });
+      broadcastScores();
+      return true;
+    }
+  }
+  return false;
+}
+
+// Stands its ground facing one fixed direction forever (never turns to
+// track anyone) and only swings at whoever's standing in that direction
+// within reach. Whatever melee weapon last hit it becomes the weapon it
+// swings back with - hit it with an axe to test shield-stun, a sword to
+// test plain blocking, etc.
+function addAttackDummy() {
+  const id = 'atkdummy' + (nextBotId++);
+  const existing = [...players.values()].filter(p => p.attackDummy).length;
+  const name = existing === 0 ? 'Attack Dummy' : 'Attack Dummy ' + (existing + 1);
+  // Full diamond/Protection IV too, for the same reason as the training dummy.
+  const p = makePlayer(id, name, true, 'diamond');
+  p.dummy = true;
+  p.attackDummy = true;
+  p.difficulty = null;
+  p.home = { x: p.x, y: p.y, z: p.z };
+  p.fixedYaw = p.yaw;
+  p.retaliateWeapon = 'sword';
+  p.retaliateEnchants = null;
+  players.set(id, p);
+  io.emit('playerJoin', publicPlayer(p));
+  broadcastScores();
+  return p;
+}
+
+function removeAttackDummy() {
+  for (const p of players.values()) {
+    if (p.attackDummy) {
+      players.delete(p.id);
+      io.emit('playerLeave', { id: p.id });
+      broadcastScores();
+      return true;
+    }
+  }
+  return false;
+}
+
+function nearestTarget(bot) {
+  let best = null, bestD = 70;
+  for (const p of players.values()) {
+    if (p.id === bot.id || !p.alive || p.dummy) continue; // bots ignore dummies
+    if (botsCooperate && p.bot) continue; // gang-up mode: bots only ever target the human player(s)
+    if (now() - p.spawnAt < C.SPAWN_PROTECT) continue;
+    const d = Math.hypot(p.x - bot.x, (p.y - bot.y) * 0.5, p.z - bot.z);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+
+function lineOfSight(a, b) {
+  const ox = a.x, oy = a.y + MC.PHYS.EYE, oz = a.z;
+  const tx = b.x, ty = b.y + 1.2, tz = b.z;
+  const dx = tx - ox, dy = ty - oy, dz = tz - oz;
+  const len = Math.hypot(dx, dy, dz);
+  const steps = Math.ceil(len * 2);
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (MC.SOLID[getBlock(Math.floor(ox + dx * t), Math.floor(oy + dy * t), Math.floor(oz + dz * t))]) return false;
+  }
+  return true;
+}
+
+/**
+ * Never turns, never chases - just swings at whatever's standing in its one
+ * fixed direction within reach, using whichever melee weapon last landed on
+ * it (see the retaliateWeapon tracking in applyDamage).
+ */
+function stepAttackDummy(bot, t) {
+  bot.yaw = bot.fixedYaw;
+  const fx = -Math.sin(bot.fixedYaw), fz = -Math.cos(bot.fixedYaw); // yaw 0 == -Z
+  let target = null, bestD = C.REACH_ATTACK - 0.5;
+  for (const p of players.values()) {
+    if (p.id === bot.id || !p.alive || p.dummy) continue;
+    if (t - p.spawnAt < C.SPAWN_PROTECT) continue;
+    const dx = p.x - bot.x, dz = p.z - bot.z, dy = p.y - bot.y;
+    const dist = Math.hypot(dx, dz);
+    if (dist > bestD || Math.abs(dy) > 2.2) continue;
+    if ((dx / (dist || 1)) * fx + (dz / (dist || 1)) * fz < 0.5) continue; // outside its one attack direction
+    target = p; bestD = dist;
+  }
+  if (!target) return;
+  const weapon = BOT_WEAPONS[bot.retaliateWeapon] || BOT_WEAPONS.sword;
+  bot.slot = weapon.slot;
+  if (t - bot.lastAttack > weapon.cooldown) {
+    bot.lastAttack = t;
+    io.emit('swing', { id: bot.id });
+    const enchants = bot.retaliateEnchants;
+    let dmg = weapon.damage, kbMul = 0.55;
+    if (enchants) {
+      if (enchants.sharpness) dmg += C.SHARPNESS_DMG_BONUS;
+      if (weapon.key === 'sword' && enchants.knockback) kbMul += C.KNOCKBACK_ENCHANT_ADD;
+    }
+    const dx = target.x - bot.x, dz = target.z - bot.z, l = Math.hypot(dx, dz) || 1;
+    applyDamage(target, dmg, bot, weapon.key, (dx / l) * kbMul, (dz / l) * kbMul, 0.42);
+    if (weapon.key === 'sword' && enchants && enchants.fireAspect) ignitePlayer(target, t);
+  }
+}
+
+function stepBot(bot, dt, t) {
+  if (!bot.alive) return;
+  if (bot.dummy && !bot.attackDummy) return; // a training dummy never moves or fights back
+  if (bot.attackDummy) { stepAttackDummy(bot, t); return; }
+  const ai = bot.ai;
+  let target = players.get(ai.target);
+  if (!target || !target.alive || Math.hypot(target.x - bot.x, target.z - bot.z) > 75) {
+    target = nearestTarget(bot);
+    ai.target = target ? target.id : null;
+  }
+
+  const input = { forward: 0, strafe: 0, jump: false, sneak: false, sprint: false, yaw: bot.yaw };
+
+  if (target) {
+    const dx = target.x - bot.x, dz = target.z - bot.z, dy = target.y - bot.y;
+    const dist = Math.hypot(dx, dz);
+    const wantYaw = Math.atan2(-dx, -dz); // yaw 0 == -Z
+    let diff = wantYaw - bot.yaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    const turn = (2.5 + bot.skill * 5) * dt;
+    bot.yaw += clamp(diff, -turn, turn);
+    bot.pitch = clamp(-Math.atan2(dy + 1.2 - MC.PHYS.EYE, Math.max(0.5, dist)), -1.4, 1.4);
+
+    if (t > ai.nextStrafe) {
+      ai.strafe = pick([-1, 0, 1, 1, -1]);
+      ai.nextStrafe = t + rand(0.4, 1.3);
+    }
+
+    if (dist > 2.2) {
+      input.forward = 1;
+      input.sprint = dist > 5 && bot.skill > 0.45;
+      input.strafe = ai.strafe * 0.5;
+    } else {
+      input.forward = 0.2;
+      input.strafe = ai.strafe;
+    }
+
+    // jump over obstacles / to reach higher ground / combo jumping
+    if (bot.blocked || (dy > 0.8 && dist < 4)) input.jump = true;
+    if (dist < 3 && Math.random() < 0.02 + bot.skill * 0.03) input.jump = true;
+
+    // versatile/full bots don't commit to one melee weapon for life - they
+    // periodically reconsider, same as a player switching hotbar slots.
+    if (bot.weaponMode !== 'fixed' && t > (ai.nextWeaponSwitch || 0)) {
+      ai.nextWeaponSwitch = t + rand(8, 15);
+      bot.meleeWeapon = pickBotWeapon(bot.kit);
+    }
+
+    // melee
+    const weapon = BOT_WEAPONS[bot.meleeWeapon] || BOT_WEAPONS.sword;
+    if (dist < C.REACH_ATTACK - 0.5 && Math.abs(dy) < 2.2 && t - bot.lastAttack > weapon.cooldown / Math.max(0.4, bot.skill)) {
+      bot.lastAttack = t;
+      bot.slot = weapon.slot;
+      io.emit('swing', { id: bot.id });
+      if (lineOfSight(bot, target)) {
+        const l = Math.hypot(dx, dz) || 1;
+        applyDamage(target, weapon.damage * botDamageMult(bot), bot, weapon.key, (dx / l) * 0.55, (dz / l) * 0.55, 0.42);
+      }
+    }
+
+    // full only (the most advanced AI tier) - and even then, sparingly: a
+    // real fight, not a bot that tops off the instant it's scratched.
+    // Golden apples only kick in once genuinely low on health, gated by a
+    // random per-check chance on top of a long cooldown so it doesn't
+    // reliably eat the very first tick it qualifies.
+    if (bot.weaponMode === 'full' && bot.health < C.MAX_HEALTH * 0.35 && bot.ammo.gapple > 0 &&
+        t > (ai.nextEat || 0) && Math.random() < 0.2) {
+      ai.nextEat = t + rand(5, 9);
+      const gapple = ITEM_BY_KEY.gapple;
+      bot.ammo.gapple--;
+      bot.health = Math.min(C.MAX_HEALTH, bot.health + gapple.heal);
+      bot.absorption = Math.min(8, bot.absorption + gapple.absorb);
+      io.emit('hp', { id: bot.id, health: bot.health, absorption: bot.absorption });
+      io.emit('effect', { kind: 'eat', x: bot.x, y: bot.y + 1.2, z: bot.z });
+    }
+
+    // full: throws potions at its own feet situationally - Instant Health
+    // when badly hurt (an alternative to the gapple above, same low-health
+    // gate so it doesn't burn through both at once), Strength when about to
+    // brawl up close, Speed when it needs to close distance on a target
+    // that's pulling away. Only ever potions its own loadout actually has.
+    if (bot.weaponMode === 'full' && t > (ai.nextPotion || 0)) {
+      let potionKey = null;
+      if (bot.health < C.MAX_HEALTH * 0.35 && playerHasItem(bot, 'pot_health') && bot.ammo.pot_health > 0) {
+        potionKey = 'pot_health';
+      } else if (dist < 4 && playerHasItem(bot, 'pot_strength') && bot.ammo.pot_strength > 0 && Math.random() < 0.35) {
+        potionKey = 'pot_strength';
+      } else if (dist > 8 && playerHasItem(bot, 'pot_speed') && bot.ammo.pot_speed > 0 && Math.random() < 0.3) {
+        potionKey = 'pot_speed';
+      }
+      if (potionKey) {
+        ai.nextPotion = t + rand(8, 14);
+        bot.ammo[potionKey]--;
+        spawnProjectile(bot, 'potion', bot.x, bot.y + MC.PHYS.EYE, bot.z, 0, -1, 0, 1, { potionKey });
+      }
+    }
+
+    // full: occasionally drop a cobweb near the player's feet to slow them
+    // down - never builds with cobble/planks, just this one tactical block.
+    if (bot.weaponMode === 'full' && dist < 8 && dist > 1.5 && t > (ai.nextWeb || 0) && Math.random() < 0.15) {
+      ai.nextWeb = t + rand(4, 8);
+      const wx = Math.floor(target.x), wy = Math.floor(target.y), wz = Math.floor(target.z);
+      if (getBlock(wx, wy, wz) === ID.AIR && setBlock(wx, wy, wz, ID.COBWEB)) {
+        io.emit('block', { x: wx, y: wy, z: wz, id: ID.COBWEB, by: bot.id });
+      }
+    }
+
+    // shield: raise it in short bursts while a fight is close, more often
+    // (and for longer) the higher the bot's skill.
+    if (bot.blocking) {
+      if (t > ai.blockUntil) bot.blocking = false;
+    } else if (dist < 4.5 && t > (ai.nextBlock || 0) && t > (bot.shieldStunUntil || 0) && Math.random() < 0.02 + bot.skill * 0.03) {
+      bot.blocking = true;
+      ai.blockUntil = t + rand(0.3, 0.5 + bot.skill * 0.6);
+      ai.nextBlock = ai.blockUntil + rand(0.4, 1.2);
+    }
+
+    // bow
+    if (dist > 9 && dist < 45 && t > ai.nextShot && bot.ammo.arrow > 0 && lineOfSight(bot, target)) {
+      ai.nextShot = t + rand(1.5, 4) / Math.max(0.4, bot.skill);
+      bot.ammo.arrow--;
+      bot.slot = 1;
+      const err = (1 - bot.skill) * 0.09;
+      const flight = dist / C.ARROW_SPEED;
+      const aimY = target.y + 1.0 + 0.5 * C.ARROW_GRAVITY * flight * flight;
+      let vx = target.x - bot.x + rand(-err, err) * dist;
+      let vy = aimY - (bot.y + MC.PHYS.EYE);
+      let vz = target.z - bot.z + rand(-err, err) * dist;
+      const l = Math.hypot(vx, vy, vz) || 1;
+      spawnProjectile(bot, 'arrow', bot.x, bot.y + MC.PHYS.EYE, bot.z, vx / l, vy / l, vz / l, 1);
+    } else if (dist < 6) {
+      bot.slot = weapon.slot;
+    }
+  } else {
+    // wander
+    if (!ai.wander || Math.hypot(ai.wander[0] - bot.x, ai.wander[1] - bot.z) < 3) {
+      ai.wander = [rand(8, W.SX - 8), rand(8, W.SZ - 8)];
+    }
+    const wantYaw = Math.atan2(-(ai.wander[0] - bot.x), -(ai.wander[1] - bot.z));
+    let diff = wantYaw - bot.yaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    bot.yaw += clamp(diff, -2 * dt, 2 * dt);
+    bot.pitch *= 0.9;
+    input.forward = 1;
+    if (bot.blocked) input.jump = true;
+    bot.blocking = false;
+  }
+
+  input.yaw = bot.yaw;
+  input.block = bot.blocking;
+  const prevY = bot.y;
+  const wasGround = bot.onGround;
+  Physics.step(getBlock, bot, input, dt);
+
+  // drowning / stuck-in-water escape
+  if (Physics.headInWater(getBlock, bot.x, bot.y, bot.z)) bot.vy = Math.max(bot.vy, 2.5);
+
+  // fall damage
+  trackFall(bot, prevY, wasGround);
+}
+
+function trackFall(p, prevY, wasGround) {
+  if (!p.alive) return;
+  if (!p.onGround) {
+    if (p.vy < -0.1) {
+      if (p.fallFrom === null || p.fallFrom === undefined) p.fallFrom = prevY;
+      else p.fallFrom = Math.max(p.fallFrom, prevY);
+    } else if (p.vy > 0.1) {
+      p.fallFrom = null;
+    }
+  } else if (p.fallFrom !== null && p.fallFrom !== undefined) {
+    const dist = p.fallFrom - p.y;
+    p.fallFrom = null;
+    if (dist > C.FALL_SAFE && !Physics.inWater(getBlock, p.x, p.y, p.z)) {
+      applyDamage(p, Math.floor(dist - C.FALL_SAFE), null, 'fall', 0, 0, 0);
+    }
+  }
+}
+
+// ------------------------------------------------------------- game loop ---
+let lastTick = Date.now();
+let snapAccum = 0;
+let spreadAccum = 0;
+
+function tick() {
+  const t0 = Date.now();
+  const dt = Math.min(0.1, (t0 - lastTick) / 1000);
+  lastTick = t0;
+  const t = now();
+
+  if (t >= weatherUntil) rollWeather();
+  // Rare cosmetic strikes during a thunderstorm, just for atmosphere - near
+  // a random living player so it's actually visible to someone, no damage.
+  if (weather === 'thunder' && Math.random() < C.RANDOM_LIGHTNING_CHANCE_PER_TICK) {
+    const alive = [...players.values()].filter(p => p.alive);
+    if (alive.length) {
+      const p = pick(alive);
+      io.emit('effect', { kind: 'lightning', x: p.x + rand(-6, 6), y: p.y + 1, z: p.z + rand(-6, 6) });
+    }
+  }
+
+  for (const p of players.values()) {
+    if (!p.alive) {
+      if (t >= p.respawnAt) respawn(p);
+      continue;
+    }
+    if (p.bot) stepBot(p, dt, t);
+
+    // natural regeneration
+    if (p.health > 0 && p.health < C.MAX_HEALTH &&
+        t - p.lastDamage > C.REGEN_DELAY && t - p.lastRegen > C.REGEN_INTERVAL) {
+      p.lastRegen = t;
+      p.health = Math.min(C.MAX_HEALTH, p.health + 1);
+      if (p.socket) p.socket.emit('heal', { health: p.health, absorption: p.absorption });
+      io.emit('hp', { id: p.id, health: p.health, absorption: p.absorption });
+    }
+    // Fire Aspect / Flame: burning ticks once a second while p.burnUntil is
+    // in the future, bypassing armor (a status effect, not a weapon hit) -
+    // Fire Resistance blocks it outright.
+    if (p.burnUntil > t) {
+      if (!activeEffect(p, 'fireResistance', t) && t - p.lastBurnTick >= 1) {
+        p.lastBurnTick = t;
+        applyDamage(p, C.BURN_DPS, null, 'fire', 0, 0, 0);
+      }
+    }
+    // Regeneration (egap) - independent of natural regen above: ticks
+    // regardless of recent damage, faster, and only for its own duration.
+    {
+      const regen = activeEffect(p, 'regeneration', t);
+      if (regen && p.health > 0 && p.health < C.MAX_HEALTH && t - p.lastEffectRegenTick >= C.REGEN_TICK_INTERVAL) {
+        p.lastEffectRegenTick = t;
+        p.health = Math.min(C.MAX_HEALTH, p.health + C.REGEN_HP_PER_LEVEL_PER_TICK * regen.level);
+        if (p.socket) p.socket.emit('heal', { health: p.health, absorption: p.absorption });
+        io.emit('hp', { id: p.id, health: p.health, absorption: p.absorption });
+      }
+    }
+    // Lava: hurts once a second (bypasses armor, same as fire/burn - it's an
+    // environmental hazard, not a weapon hit) and also ignites, so the burn
+    // keeps ticking for a few seconds after stepping out.
+    if (isInLava(p)) {
+      if (!activeEffect(p, 'fireResistance', t) && t - p.lastBurnTick >= 1) {
+        p.lastBurnTick = t;
+        applyDamage(p, C.LAVA_DPS, null, 'lava', 0, 0, 0);
+      }
+      ignitePlayer(p, t);
+    }
+    // A flint-and-steel ground fire - same shape as lava above, lighter
+    // damage, and it burns itself out instead of being a permanent block.
+    if (groundFires.some(f => Math.floor(p.x) === f.x && Math.floor(p.y) === f.y && Math.floor(p.z) === f.z)) {
+      if (!activeEffect(p, 'fireResistance', t) && t - p.lastBurnTick >= 1) {
+        p.lastBurnTick = t;
+        applyDamage(p, C.GROUND_FIRE_DPS, null, 'fire', 0, 0, 0);
+      }
+      ignitePlayer(p, t);
+    }
+
+    // void / suffocation guard
+    if (p.y < -3) applyDamage(p, 100, null, 'void', 0, 0, 0);
+
+    // drop idle humans
+    if (!p.bot && t - p.lastSeen > 45) {
+      if (p.socket) p.socket.disconnect(true);
+    }
+  }
+
+  // TNT / TNT Minecart fuses - explode anything whose timer has run out.
+  if (liveTNT.length) {
+    const stillLit = [];
+    for (const fuse of liveTNT) {
+      if (t >= fuse.explodeAt) {
+        setBlock(fuse.x, fuse.y, fuse.z, ID.AIR);
+        io.emit('block', { x: fuse.x, y: fuse.y, z: fuse.z, id: ID.AIR, by: fuse.ownerId });
+        explodeTNT(fuse.x + 0.5, fuse.y + 0.5, fuse.z + 0.5, fuse.radius, fuse.dmg, fuse.kb, fuse.ownerId);
+      } else {
+        stillLit.push(fuse);
+      }
+    }
+    liveTNT = stillLit;
+  }
+
+  // Ground fires burn out on their own - the damage tick above already
+  // checked them this frame, this just forgets expired ones.
+  if (groundFires.length) groundFires = groundFires.filter(f => t < f.until);
+
+  // Water/lava spread - a few queued cells at a time, throttled well below
+  // tick rate so it stays a slow trickle rather than an instant flood.
+  spreadAccum += dt;
+  if (spreadAccum >= C.LIQUID_SPREAD_INTERVAL) {
+    spreadAccum = 0;
+    let n = C.LIQUID_SPREAD_PER_TICK;
+    while (n-- > 0 && liquidSpreadQueue.length) {
+      const cur = liquidSpreadQueue.shift();
+      const maxHop = cur.kind === ID.LAVA ? C.LAVA_SPREAD_MAX_HOPS : C.WATER_SPREAD_MAX_HOPS;
+      if (cur.hop >= maxHop) continue;
+      const dirs = [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+      for (const [dx, dy, dz] of dirs) {
+        const nx = cur.x + dx, ny = cur.y + dy, nz = cur.z + dz;
+        if (!inBounds(nx, ny, nz)) continue;
+        if (getBlock(nx, ny, nz) !== ID.AIR) continue;
+        if (setBlock(nx, ny, nz, cur.kind)) {
+          io.emit('block', { x: nx, y: ny, z: nz, id: cur.kind, by: null });
+          liquidSpreadQueue.push({ x: nx, y: ny, z: nz, kind: cur.kind, hop: cur.hop + 1 });
+        }
+      }
+    }
+  }
+
+  stepProjectiles(dt);
+
+  snapAccum += dt;
+  if (snapAccum >= 1 / SNAPSHOT_HZ) {
+    snapAccum = 0;
+    sendSnapshot();
+  }
+}
+
+function sendSnapshot() {
+  const t = now();
+  const list = [];
+  for (const p of players.values()) {
+    list.push([
+      p.id,
+      Math.round(p.x * 100) / 100, Math.round(p.y * 100) / 100, Math.round(p.z * 100) / 100,
+      Math.round(p.yaw * 1000) / 1000, Math.round(p.pitch * 1000) / 1000,
+      p.health, p.alive ? 1 : 0, p.slot,
+      (p.sneak ? 1 : 0) | (p.sprint ? 2 : 0) | (p.blocking ? 4 : 0) | (p.burnUntil > t ? 8 : 0) | (hasAnyEffect(p, t) ? 16 : 0),
+      Math.round(p.vx * 10) / 10, Math.round(p.vz * 10) / 10
+    ]);
+  }
+  const prj = projectiles.map(p => [p.id, p.kind === 'pearl' ? 1 : 0,
+    Math.round(p.x * 100) / 100, Math.round(p.y * 100) / 100, Math.round(p.z * 100) / 100,
+    Math.round(p.vx * 10) / 10, Math.round(p.vy * 10) / 10, Math.round(p.vz * 10) / 10]);
+  io.volatile.emit('snapshot', { t: Date.now(), p: list, r: prj });
+}
+
+// ---------------------------------------------------------------- server ---
+const app = express();
+// Force revalidation on every request. The client's own copy of shared/*.js
+// generates its local world model from the same seed as the server - if a
+// browser ever serves a stale cached copy after the world/game code changes,
+// the client and server silently disagree about what's solid ground, which
+// looks exactly like the world "not generating properly" and entities
+// "flying" (they're standing on server-side geometry the stale client never
+// built). no-store rules that out entirely, at the cost of a full re-fetch
+// on every load - a fair trade for a small local game.
+const noCache = (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
+app.use(noCache);
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0, etag: false, lastModified: false }));
+app.use('/shared', express.static(path.join(__dirname, 'shared'), { maxAge: 0, etag: false, lastModified: false }));
+app.get('/health', (req, res) => res.json({
+  ok: true, players: players.size, bots: [...players.values()].filter(p => p.bot).length, seed: SEED
+}));
+// Manual escape hatch for the menu's "Reset Terrain" button - doesn't need a
+// live socket connection (the button lives on the pre-join menu screen), and
+// still broadcasts to anyone already playing so their client rebuilds too.
+app.post('/reset', (req, res) => {
+  resetWorld();
+  io.emit('worldReset', { seed: SEED });
+  io.emit('chat', { system: true, text: 'The terrain was reset.' });
+  res.json({ ok: true });
+});
+
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' }, pingInterval: 5000, pingTimeout: 12000 });
+
+io.on('connection', socket => {
+  let me = null;
+
+  socket.on('join', (data, ack) => {
+    if (me) return;
+    const name = (data && data.name ? String(data.name) : 'Player').replace(/[^\w \-\[\]]/g, '').trim().slice(0, 16) || 'Player';
+    const kit = data && MC.KITS[data.kit] ? data.kit : 'web';
+    // Nobody else human around (typical "refresh the tab, click Play again")
+    // -> treat this as a fresh session and clear whatever got built/broken
+    // last time. Never wipes a map other real players are still using.
+    if (![...players.values()].some(p => !p.bot)) resetWorld();
+    me = makePlayer(socket.id, name, false, null, kit, data && data.customItems, data && data.enchantOpts);
+    me.socket = socket;
+    players.set(me.id, me);
+
+    const editList = [];
+    for (const [i, id] of edits) editList.push(i, id);
+
+    socket.emit('init', {
+      id: me.id,
+      seed: SEED,
+      spawn: { x: me.x, y: me.y, z: me.z },
+      edits: editList,
+      players: [...players.values()].map(publicPlayer),
+      you: publicPlayer(me),
+      ammo: me.ammo,
+      serverTime: Date.now(),
+      weather: weather
+    });
+    socket.broadcast.emit('playerJoin', publicPlayer(me));
+    io.emit('chat', { system: true, text: name + ' joined the arena' });
+    broadcastScores();
+    if (typeof ack === 'function') ack({ ok: true });
+  });
+
+  socket.on('state', d => {
+    if (!me || !me.alive || !d) return;
+    me.lastSeen = now();
+    const nx = +d.x, ny = +d.y, nz = +d.z;
+    if (!isFinite(nx) || !isFinite(ny) || !isFinite(nz)) return;
+    // Loose sanity check: reject absurd teleports, otherwise trust the client.
+    const jump = Math.hypot(nx - me.x, ny - me.y, nz - me.z);
+    if (jump > 24) {
+      socket.emit('teleport', { x: me.x, y: me.y, z: me.z });
+      return;
+    }
+    const prevY = me.y;
+    const wasGround = me.onGround;
+    me.x = clamp(nx, 0, W.SX); me.y = clamp(ny, -10, W.SY); me.z = clamp(nz, 0, W.SZ);
+    me.vx = +d.vx || 0; me.vy = +d.vy || 0; me.vz = +d.vz || 0;
+    me.yaw = +d.yaw || 0; me.pitch = +d.pitch || 0;
+    me.onGround = !!d.g;
+    me.sneak = !!d.sn;
+    me.sprint = !!d.sp;
+    me.blocking = !!d.bl && now() > (me.shieldStunUntil || 0);
+    me.slot = clamp(d.slot | 0, 0, MC.ITEMS.length - 1);
+    trackFall(me, prevY, wasGround);
+  });
+
+  socket.on('ping', (t, ack) => {
+    if (me) me.lastSeen = now();
+    if (typeof ack === 'function') ack(t);
+  });
+
+  socket.on('swing', () => {
+    if (!me || !me.alive) return;
+    socket.broadcast.emit('swing', { id: me.id });
+  });
+
+  socket.on('attack', d => {
+    if (!me || !me.alive || !d) return;
+    const t = now();
+    const item = itemForPlayer(me, me.slot);
+    if (!item) return;
+    if (item.type !== 'weapon' && item.type !== 'tool' && item.type !== 'block' && item.type !== 'bow') return;
+    const cd = item.cooldown || 0.3;
+    if (t - me.lastAttack < cd * 0.85) return;
+    // A thrown trident isn't in hand again until it "returns" - see the
+    // 'shoot' handler, which sets this based on Loyalty.
+    if (item.key === 'trident' && t < (me.tridentAvailableAt || 0)) return;
+
+    const isSpear = item.key === 'spear';
+    // Holding the attack button instead of tapping charges a stronger
+    // thrust - only meaningful for the spear, ignored for every other item.
+    const charged = isSpear && !!d.charged;
+
+    // The spear pierces every valid target in front of it (up to 8), sent as
+    // d.ids; every other weapon is the usual single d.id. A charged thrust
+    // reaches further on top of the spear's own longer reach.
+    const reach = (item.reach || C.REACH_ATTACK) + C.REACH_ATTACK_SLACK + (charged ? C.SPEAR_CHARGE_REACH_BONUS : 0);
+    const minReach = item.minReach || 0;
+    const rawIds = item.pierce && Array.isArray(d.ids) ? d.ids.slice(0, 8) : [d.id];
+    const hits = [];
+    for (const id of rawIds) {
+      const victim = players.get(id);
+      if (!victim || !victim.alive || victim.id === me.id) continue;
+      const dist = Math.hypot(victim.x - me.x, (victim.y + 0.9) - (me.y + MC.PHYS.EYE), victim.z - me.z);
+      if (dist > reach || dist < minReach) continue;
+      hits.push(victim);
+    }
+    // Every other weapon needs an actual target to do anything; the spear's
+    // Lunge fires on every swing regardless (a mobility tool as much as a
+    // weapon), so only bail out here for a non-spear whiff.
+    if (!hits.length && !isSpear) return;
+    me.lastAttack = t;
+
+    let dmg = item.damage || 1;
+    let kbMul = item.knockback || 0.5;
+    // critical hit: falling and not on the ground (classic MC rule) - a mace
+    // instead turns this into a smash attack, scaling with fall distance.
+    let crit = false, smash = false;
+    if (!me.onGround && me.vy < -0.15) {
+      if (item.key === 'mace') {
+        smash = true;
+        const peak = me.fallFrom === null || me.fallFrom === undefined ? me.y : me.fallFrom;
+        const fallDist = Math.min(C.MACE_MAX_FALL, Math.max(0, peak - me.y));
+        dmg = Math.ceil(C.MACE_SMASH_BASE + fallDist * C.MACE_DENSITY_PER_BLOCK);
+        kbMul += 0.8;
+      } else {
+        dmg = Math.ceil(dmg * 1.5);
+        crit = true;
+      }
+    }
+    const str = activeEffect(me, 'strength', t);
+    if (str) dmg += C.STRENGTH_DMG_PER_LEVEL * str.level;
+    // Sharpness V (sword/axe) and Knockback III (sword) are opt-in toggles -
+    // see ENCHANT_DEFS / the menu's Enchantments panel.
+    if ((item.key === 'sword' || item.key === 'axe') && hasEnchant(me, item.key, 'sharpness')) dmg += C.SHARPNESS_DMG_BONUS;
+    if (item.key === 'sword' && hasEnchant(me, 'sword', 'knockback')) kbMul += C.KNOCKBACK_ENCHANT_ADD;
+    // The knockback stick: Knockback V (if on) always wins over II.
+    if (item.key === 'stick') {
+      if (hasEnchant(me, 'stick', 'knockback5')) kbMul += C.STICK_KB5_ADD;
+      else if (hasEnchant(me, 'stick', 'knockback2')) kbMul += C.STICK_KB2_ADD;
+    }
+    if (charged) dmg *= C.SPEAR_CHARGE_DMG_MULT;
+    if (me.sprint) kbMul += 0.5;
+
+    const fireAspect = item.key === 'sword' && hasEnchant(me, 'sword', 'fireAspect');
+    const impaling = item.key === 'trident' && hasEnchant(me, 'trident', 'impaling');
+    for (const victim of hits) {
+      const dx = victim.x - me.x, dz = victim.z - me.z;
+      const l = Math.hypot(dx, dz) || 1;
+      const victimDmg = dmg + (impaling && isInWater(victim) ? C.TRIDENT_IMPALING_BONUS_DMG : 0);
+      applyDamage(victim, victimDmg, me, item.key, (dx / l) * 0.55 * kbMul, (dz / l) * 0.55 * kbMul, 0.42);
+      if (fireAspect) ignitePlayer(victim, t);
+    }
+    if (crit && hits.length) io.emit('effect', { kind: 'crit', x: hits[0].x, y: hits[0].y + 1, z: hits[0].z });
+    if (smash) {
+      io.emit('effect', { kind: 'smash', x: hits[0].x, y: hits[0].y + 0.2, z: hits[0].z });
+      // Wind Burst III: launch the wielder back into the air so a smash can
+      // be chained, and waive whatever fall damage this landing would've
+      // otherwise dealt (same as vanilla).
+      me.vy = C.MACE_WINDBURST_VY;
+      me.fallFrom = null;
+      socket.emit('launch', { vy: C.MACE_WINDBURST_VY });
+    }
+    if (isSpear) {
+      // Lunge III: every spear swing propels the wielder forward
+      // horizontally, stronger mid-air - a charged thrust dashes further still.
+      const fx = -Math.sin(me.yaw), fz = -Math.cos(me.yaw); // yaw 0 == -Z
+      let mul = C.SPEAR_LUNGE_SPEED * (me.onGround ? 1 : C.SPEAR_LUNGE_AIR_MULT);
+      if (charged) mul *= C.SPEAR_CHARGE_LUNGE_MULT;
+      const lvx = fx * mul, lvz = fz * mul;
+      me.vx += lvx; me.vz += lvz;
+      socket.emit('launch', { vx: lvx, vz: lvz });
+    }
+  });
+
+  socket.on('shoot', d => {
+    if (!me || !me.alive || !d) return;
+    const dir = normalize(d.dx, d.dy, d.dz);
+    if (!dir) return;
+    const item = itemForPlayer(me, me.slot);
+    if (!item) return;
+    if (item.type === 'bow') {
+      if (me.ammo.arrow <= 0) return;
+      me.ammo.arrow--;
+      const power = clamp(+d.power || 0, 0.1, 1);
+      spawnProjectile(me, 'arrow', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], power, { weaponKey: 'bow' });
+      socket.emit('ammo', me.ammo);
+    } else if (item.type === 'crossbow') {
+      // Quick Charge is just its own short drawTime (client-side charge
+      // timer, same mechanism as the bow) - Multishot fires several arrows
+      // in a horizontal spread from a single arrow of ammo.
+      if (me.ammo.arrow <= 0) return;
+      me.ammo.arrow--;
+      const power = clamp(+d.power || 0, 0.1, 1);
+      const n = C.CROSSBOW_MULTISHOT_COUNT, spread = C.CROSSBOW_MULTISHOT_SPREAD;
+      for (let i = 0; i < n; i++) {
+        const off = (i - (n - 1) / 2) * spread;
+        const cosA = Math.cos(off), sinA = Math.sin(off);
+        const ndx = dir[0] * cosA - dir[2] * sinA, ndz = dir[0] * sinA + dir[2] * cosA;
+        spawnProjectile(me, 'arrow', me.x, me.y + MC.PHYS.EYE, me.z, ndx, dir[1], ndz, power, { weaponKey: 'crossbow' });
+      }
+      socket.emit('ammo', me.ammo);
+    } else if (item.throwable) {
+      // Trident. Riptide launches the thrower instead of throwing it at all,
+      // if they're currently wet (in water, or it's raining/thundering) -
+      // holding sneak forces a normal throw anyway, same override vanilla
+      // uses. Loyalty (checked either way) is how long until it's ready to
+      // use again; no physical pickup in this game, so "walk over and grab
+      // it" is simulated as a cooldown instead.
+      const t = now();
+      if (t < (me.tridentAvailableAt || 0)) return;
+      if (hasEnchant(me, 'trident', 'riptide') && isWet(me) && !me.sneak) {
+        const vx = dir[0] * C.TRIDENT_RIPTIDE_SPEED, vy = Math.max(dir[1], 0.3) * C.TRIDENT_RIPTIDE_SPEED, vz = dir[2] * C.TRIDENT_RIPTIDE_SPEED;
+        me.vx += vx; me.vy = Math.max(me.vy, vy); me.vz += vz;
+        me.tridentAvailableAt = t + C.TRIDENT_COOLDOWN_WITH_LOYALTY;
+        socket.emit('launch', { vx, vy, vz });
+        return;
+      }
+      me.tridentAvailableAt = t + (hasEnchant(me, 'trident', 'loyalty') ? C.TRIDENT_COOLDOWN_WITH_LOYALTY : C.TRIDENT_COOLDOWN_NO_LOYALTY);
+      spawnProjectile(me, 'trident', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], 1);
+    } else if (item.type === 'pearl') {
+      const t = now();
+      if (me.ammo.pearl <= 0 || t - me.lastAttack < item.cooldown) return;
+      me.lastAttack = t;
+      me.ammo.pearl--;
+      spawnProjectile(me, 'pearl', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], 1);
+      socket.emit('ammo', me.ammo);
+    } else if (item.type === 'windcharge') {
+      const t = now();
+      // Its own cooldown timer, not shared with melee/pearl (me.lastAttack) -
+      // the pearl combo below needs a wind charge to follow a thrown pearl
+      // within a fraction of a second, which the shared melee cooldown would
+      // rule out (a pearl travels ~24 blocks in the 0.8s that cooldown takes).
+      if (me.ammo.windcharge <= 0 || t - (me.lastWindcharge || 0) < item.cooldown) return;
+      me.lastWindcharge = t;
+      me.ammo.windcharge--;
+      spawnProjectile(me, 'windcharge', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], 1);
+      // Using it always launches the thrower straight up, vanilla's classic
+      // "wind charge jump" - independent of whatever the thrown charge itself
+      // goes on to hit.
+      me.vy = Math.max(me.vy, C.WINDCHARGE_SELF_LAUNCH_VY);
+      socket.emit('launch', { vy: C.WINDCHARGE_SELF_LAUNCH_VY });
+      socket.emit('ammo', me.ammo);
+    } else if (item.type === 'potion') {
+      const t = now();
+      if (me.ammo[item.key] <= 0 || t - (me.lastPotionThrow || 0) < item.cooldown) return;
+      me.lastPotionThrow = t;
+      me.ammo[item.key]--;
+      spawnProjectile(me, 'potion', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], 1, { potionKey: item.key });
+      socket.emit('ammo', me.ammo);
+    }
+  });
+
+  socket.on('eat', () => {
+    if (!me || !me.alive) return;
+    // Generic over every food item (gapple, egap, any future one) instead
+    // of a hardcoded gapple lookup - each defines its own heal/absorb(Cap),
+    // and egap additionally grants Regeneration/Fire Resistance/Resistance
+    // (see ENCHANT_DEFS-independent buff fields on the ITEMS entry itself -
+    // these aren't player toggles, they're just what the item does).
+    const item = itemForPlayer(me, me.slot);
+    if (!item || item.type !== 'food') return;
+    if (me.ammo[item.key] <= 0) return;
+    me.ammo[item.key]--;
+    const t = now();
+    me.health = Math.min(C.MAX_HEALTH, me.health + item.heal);
+    me.absorption = Math.min(item.absorbCap || 8, me.absorption + item.absorb);
+    if (item.regenLevel) me.effects.regeneration = { level: item.regenLevel, until: t + item.regenSeconds };
+    if (item.fireResLevel) me.effects.fireResistance = { level: item.fireResLevel, until: t + item.buffSeconds };
+    if (item.resistLevel) me.effects.resistance = { level: item.resistLevel, until: t + item.buffSeconds };
+    if (item.regenLevel || item.fireResLevel || item.resistLevel) socket.emit('effects', effectsSnapshot(me, t));
+    socket.emit('heal', { health: me.health, absorption: me.absorption, ammo: me.ammo });
+    io.emit('hp', { id: me.id, health: me.health, absorption: me.absorption });
+    io.emit('effect', { kind: 'eat', x: me.x, y: me.y + 1.2, z: me.z });
+  });
+
+  socket.on('setBlock', d => {
+    if (!me || !me.alive || !d) return;
+    const x = d.x | 0, y = d.y | 0, z = d.z | 0;
+    if (!inBounds(x, y, z)) return;
+    const dist = Math.hypot(x + 0.5 - me.x, y + 0.5 - (me.y + MC.PHYS.EYE), z + 0.5 - me.z);
+    if (dist > C.REACH_BLOCK + 2) return;
+    const current = getBlock(x, y, z);
+    const id = d.id | 0;
+    let ammoChanged = false;
+
+    if (id === ID.AIR) {
+      if (MC.HARDNESS[current] < 0) return; // bedrock
+      if (current === ID.AIR) return;
+      // No bucket to pick liquids back up with any more - once placed,
+      // water/lava is permanent (short of a TNT explosion clearing it).
+      if (MC.LIQUID[current]) return;
+    } else {
+      if (current !== ID.AIR && !MC.LIQUID[current]) return;
+      if (id >= MC.BLOCKS.length) return;
+      // Can only place a block whose item is actually in your loadout (e.g.
+      // no placing cobwebs in Sword/Axe PvP even if you spoof the block id).
+      const key = BLOCK_ITEM_KEY[id];
+      if (key && !playerHasItem(me, key)) return;
+      // TNT Minecart can only be set down directly on top of a rail.
+      if (id === ID.TNT_MINECART && getBlock(x, y - 1, z) !== ID.RAIL) return;
+      // never let someone build inside a player
+      for (const p of players.values()) {
+        if (!p.alive) continue;
+        const r = MC.PHYS.WIDTH / 2;
+        if (x + 1 > p.x - r && x < p.x + r && z + 1 > p.z - r && z < p.z + r &&
+            y + 1 > p.y && y < p.y + MC.PHYS.HEIGHT) return;
+      }
+      // Ammo-limited placeable blocks (water/lava buckets, TNT) consume 1 to
+      // place - ordinary building blocks (cobble/planks/rail/...) have no
+      // `ammo` field and place for free, unaffected by this.
+      if (key) {
+        const placedItem = ITEM_BY_KEY[key];
+        if (placedItem.ammo !== undefined) {
+          if ((me.ammo[key] || 0) <= 0) return;
+          me.ammo[key]--;
+          ammoChanged = true;
+        }
+      }
+    }
+    if (setBlock(x, y, z, id)) {
+      io.emit('block', { x, y, z, id, by: me.id });
+      if (ammoChanged) socket.emit('ammo', me.ammo);
+      // Seed the bounded flood-fill spread from a freshly-placed liquid
+      // source - see the LIQUID_SPREAD_* tick below.
+      if (id === ID.WATER || id === ID.LAVA) liquidSpreadQueue.push({ x, y, z, kind: id, hop: 0 });
+    }
+  });
+
+  socket.on('ignite', d => {
+    if (!me || !me.alive || !d) return;
+    const item = itemForPlayer(me, me.slot);
+    if (!item || item.type !== 'igniter') return;
+    const x = d.x | 0, y = d.y | 0, z = d.z | 0;
+    if (!inBounds(x, y, z)) return;
+    const dist = Math.hypot(x + 0.5 - me.x, y + 0.5 - (me.y + MC.PHYS.EYE), z + 0.5 - me.z);
+    if (dist > C.IGNITE_REACH) return;
+    const block = getBlock(x, y, z);
+    if (MC.HARDNESS[block] < 0 || block === ID.AIR || MC.LIQUID[block]) return; // bedrock, nothing there, or a liquid
+    if (block === ID.TNT || block === ID.TNT_MINECART) igniteTNTBlock(x, y, z, me.id);
+    else lightGroundFire(x, y, z);
+  });
+
+  socket.on('chat', text => {
+    if (!me) return;
+    let msg = String(text || '').slice(0, 140).trim();
+    if (!msg) return;
+    if (msg[0] === '/') return command(msg);
+    io.emit('chat', { id: me.id, name: me.name, text: msg });
+  });
+
+  function command(msg) {
+    const parts = msg.slice(1).split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+    const reply = text => socket.emit('chat', { system: true, text });
+    if (cmd === 'bots') {
+      const want = clamp(parseInt(parts[1], 10) || 0, 0, 16);
+      const diffArg = (parts[2] || '').toLowerCase();
+      const armorArg = (parts[3] || '').toLowerCase();
+      const kitArg = (parts[4] || '').toLowerCase();
+      const weaponArg = (parts[5] || '').toLowerCase();
+      const applyDiff = DIFFICULTY[diffArg] ? diffArg : null;
+      const applyArmor = MC.ARMOR_TIERS[armorArg] ? armorArg : null;
+      const applyKit = MC.KITS[kitArg] ? kitArg : null;
+      const applyWeapon = WEAPON_MODES.includes(weaponArg) ? weaponArg : null;
+      if (applyDiff) defaultDifficulty = applyDiff;
+      if (applyArmor) defaultBotArmor = applyArmor;
+      if (applyKit) defaultBotKit = applyKit;
+      if (applyWeapon) defaultBotWeaponMode = applyWeapon;
+      let have = [...players.values()].filter(p => p.bot && !p.dummy).length;
+      while (have < want) { addBot(defaultDifficulty, defaultBotArmor, defaultBotKit, defaultBotWeaponMode); have++; }
+      while (have > want) { if (!removeBot()) break; have--; }
+      // An explicit difficulty/armor/kit/weapon mode is a request that ALL
+      // current bots match it, not just ones newly created here - otherwise
+      // picking "Hard" or "Diamond" in the menu silently does nothing when
+      // bots already exist.
+      if (applyDiff) for (const p of players.values()) { if (p.bot && !p.dummy) setBotDifficulty(p, applyDiff); }
+      if (applyArmor) for (const p of players.values()) { if (p.bot && !p.dummy) setBotArmor(p, applyArmor); }
+      if (applyKit) for (const p of players.values()) { if (p.bot && !p.dummy) setBotKit(p, applyKit); }
+      if (applyWeapon) for (const p of players.values()) { if (p.bot && !p.dummy) setBotWeaponMode(p, applyWeapon); }
+      io.emit('chat', {
+        system: true,
+        text: me.name + ' set bots to ' + want + (applyDiff ? ' (' + applyDiff + ')' : '') + (applyArmor ? ' [' + applyArmor + ' armor]' : '') + (applyKit ? ' {' + applyKit + ' kit}' : '') + (applyWeapon ? ' <' + applyWeapon + '>' : '')
+      });
+      broadcastScores();
+    } else if (cmd === 'kit') {
+      const key = (parts[1] || '').toLowerCase();
+      if (!MC.KITS[key]) { reply('Usage: /kit <sword|axe|web>'); return; }
+      me.kit = key;
+      if (me.slot === MC.ITEMS.find(i => i.key === 'axe').slot && !MC.kitHasItem(key, 'axe')) me.slot = 0;
+      io.emit('chat', { system: true, text: me.name + ' switched to ' + key + ' kit' });
+    } else if (cmd === 'botkit') {
+      const key = (parts[1] || '').toLowerCase();
+      if (!MC.KITS[key]) { reply('Usage: /botkit <sword|axe|web>'); return; }
+      defaultBotKit = key;
+      let changed = 0;
+      for (const p of players.values()) { if (p.bot && !p.dummy) { setBotKit(p, key); changed++; } }
+      io.emit('chat', { system: true, text: me.name + ' set bot kit to ' + key + ' (' + changed + ' bots)' });
+      broadcastScores();
+    } else if (cmd === 'botweapon') {
+      const key = (parts[1] || '').toLowerCase();
+      if (!WEAPON_MODES.includes(key)) { reply('Usage: /botweapon <fixed|versatile|full>'); return; }
+      defaultBotWeaponMode = key;
+      let changed = 0;
+      for (const p of players.values()) { if (p.bot && !p.dummy) { setBotWeaponMode(p, key); changed++; } }
+      io.emit('chat', { system: true, text: me.name + ' set bot weapon mode to ' + key + ' (' + changed + ' bots)' });
+      broadcastScores();
+    } else if (cmd === 'botteam') {
+      const arg = (parts[1] || '').toLowerCase();
+      if (arg !== 'on' && arg !== 'off') { reply('Usage: /botteam <on|off>'); return; }
+      botsCooperate = arg === 'on';
+      io.emit('chat', { system: true, text: me.name + (botsCooperate ? ' made the bots team up against you' : ' let the bots go back to fighting each other') });
+    } else if (cmd === 'difficulty') {
+      const key = (parts[1] || '').toLowerCase();
+      if (!DIFFICULTY[key]) { reply('Usage: /difficulty <easy|normal|hard|random>'); return; }
+      defaultDifficulty = key;
+      let changed = 0;
+      for (const p of players.values()) { if (p.bot && !p.dummy) { setBotDifficulty(p, key); changed++; } }
+      io.emit('chat', { system: true, text: me.name + ' set difficulty to ' + key + ' (' + changed + ' bots)' });
+      broadcastScores();
+    } else if (cmd === 'botarmor') {
+      const key = (parts[1] || '').toLowerCase();
+      if (!MC.ARMOR_TIERS[key]) { reply('Usage: /botarmor <none|leather|iron|diamond>'); return; }
+      defaultBotArmor = key;
+      let changed = 0;
+      for (const p of players.values()) { if (p.bot && !p.dummy) { setBotArmor(p, key); changed++; } }
+      io.emit('chat', { system: true, text: me.name + ' set bot armor to ' + key + ' (' + changed + ' bots)' });
+      broadcastScores();
+    } else if (cmd === 'botdiff') {
+      const key = (parts[parts.length - 1] || '').toLowerCase();
+      const nameQuery = parts.slice(1, -1).join(' ').toLowerCase();
+      if (!DIFFICULTY[key] || !nameQuery) { reply('Usage: /botdiff <bot name> <easy|normal|hard|random>'); return; }
+      const target = [...players.values()].find(p => p.bot && !p.dummy && p.name.toLowerCase().includes(nameQuery));
+      if (!target) { reply('No bot matching "' + nameQuery + '"'); return; }
+      setBotDifficulty(target, key);
+      io.emit('chat', { system: true, text: me.name + ' set ' + target.name + ' to ' + key });
+      broadcastScores();
+    } else if (cmd === 'dummy') {
+      const want = clamp(parseInt(parts[1], 10) || 0, 0, 3);
+      const shieldArg = (parts[2] || '').toLowerCase();
+      const applyShield = shieldArg === 'shield' ? true : shieldArg === 'noshield' ? false : null;
+      let have = [...players.values()].filter(p => p.dummy && !p.attackDummy).length;
+      while (have < want) { addDummy(applyShield === null ? true : applyShield); have++; }
+      while (have > want) { if (!removeDummy()) break; have--; }
+      if (applyShield !== null) for (const p of players.values()) { if (p.dummy && !p.attackDummy) p.blocking = applyShield; }
+      io.emit('chat', { system: true, text: me.name + ' set training dummies to ' + want + (applyShield === null ? '' : applyShield ? ' (shield on)' : ' (shield off)') });
+    } else if (cmd === 'atkdummy') {
+      const want = clamp(parseInt(parts[1], 10) || 0, 0, 3);
+      let have = [...players.values()].filter(p => p.attackDummy).length;
+      while (have < want) { addAttackDummy(); have++; }
+      while (have > want) { if (!removeAttackDummy()) break; have--; }
+      io.emit('chat', { system: true, text: me.name + ' set attacking dummies to ' + want });
+    } else if (cmd === 'kill') {
+      applyDamage(me, 999, null, 'suicide', 0, 0, 0);
+    } else if (cmd === 'spawn') {
+      const s = pick(spawns);
+      me.x = s[0]; me.y = s[1]; me.z = s[2]; me.fallFrom = null;
+      socket.emit('teleport', { x: me.x, y: me.y, z: me.z });
+    } else if (cmd === 'weather') {
+      const kind = (parts[1] || '').toLowerCase();
+      if (kind !== 'clear' && kind !== 'rain' && kind !== 'thunder') { reply('Usage: /weather <clear|rain|thunder>'); return; }
+      weather = kind;
+      weatherUntil = now() + rand(
+        kind === 'clear' ? C.WEATHER_CLEAR_SECONDS[0] : kind === 'rain' ? C.WEATHER_RAIN_SECONDS[0] : C.WEATHER_THUNDER_SECONDS[0],
+        kind === 'clear' ? C.WEATHER_CLEAR_SECONDS[1] : kind === 'rain' ? C.WEATHER_RAIN_SECONDS[1] : C.WEATHER_THUNDER_SECONDS[1]
+      );
+      io.emit('weather', { kind: weather });
+      io.emit('chat', { system: true, text: me.name + ' set the weather to ' + weather });
+    } else if (cmd === 'help') {
+      reply('Commands: /bots <0-16> [difficulty] [armor] [kit] [weapon], /difficulty <easy|normal|hard|random>, /botarmor <none|leather|iron|diamond>, /botkit <sword|axe|web>, /botweapon <fixed|versatile|full>, /botteam <on|off>, /kit <sword|axe|web>, /botdiff <name> <level>, /dummy <0-3> [shield|noshield], /atkdummy <0-3>, /weather <clear|rain|thunder>, /spawn, /kill, /help');
+    } else {
+      reply('Unknown command: ' + cmd + ' (try /help)');
+    }
+  }
+
+  socket.on('disconnect', () => {
+    if (!me) return;
+    players.delete(me.id);
+    io.emit('playerLeave', { id: me.id });
+    io.emit('chat', { system: true, text: me.name + ' left the arena' });
+    broadcastScores();
+    me = null;
+  });
+});
+
+function normalize(x, y, z) {
+  x = +x; y = +y; z = +z;
+  if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return null;
+  const l = Math.hypot(x, y, z);
+  if (l < 1e-6) return null;
+  return [x / l, y / l, z / l];
+}
+
+for (let i = 0; i < BOT_COUNT; i++) addBot(defaultDifficulty);
+setInterval(tick, 1000 / TICK_HZ);
+
+// Bind explicitly to every interface (not just loopback) so other devices on
+// the same network can reach this process, not just the machine running it.
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('  Minecraft PvP  ->  http://localhost:' + PORT + '  (this machine only)');
+  const nets = require('os').networkInterfaces();
+  for (const name in nets) {
+    for (const net of nets[name]) {
+      // IPv4, non-internal (skips 127.0.0.1) - the address other devices on
+      // the same Wi-Fi/LAN should actually use to join.
+      if (net.family === 'IPv4' && !net.internal) {
+        console.log('  Minecraft PvP  ->  http://' + net.address + ':' + PORT + '  (share this with other devices on your network)');
+      }
+    }
+  }
+  console.log('  seed=' + SEED + '  world=' + W.SX + 'x' + W.SY + 'x' + W.SZ + '  bots=' + BOT_COUNT + '  difficulty=' + defaultDifficulty);
+});

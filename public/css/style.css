@@ -1,0 +1,150 @@
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #87b6e8; }
+body { font-family: 'Segoe UI', Verdana, monospace; user-select: none; }
+#view { position: fixed; inset: 0; display: block; width: 100%; height: 100%; cursor: crosshair; }
+.hidden { display: none !important; }
+
+#tags { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+.nametag {
+  position: absolute; transform: translate(-50%, -100%);
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  pointer-events: none;
+}
+.nametag-name {
+  color: #fff; font-size: 13px; font-weight: 700; text-shadow: 1px 1px 2px #000, 0 0 4px #000;
+  white-space: nowrap;
+}
+.nametag-hp-wrap { width: 52px; height: 5px; background: rgba(0,0,0,0.55); border: 1px solid rgba(0,0,0,0.7); border-radius: 2px; overflow: hidden; }
+.nametag-hp { height: 100%; width: 100%; background: #4caf50; transition: width 0.15s ease-out, background 0.2s; }
+
+#flash { position: fixed; inset: 0; background: #ff2020; opacity: 0; pointer-events: none; z-index: 20; transition: opacity 0.05s linear; }
+#weatherFlash { position: fixed; inset: 0; background: #ffffff; opacity: 0; pointer-events: none; z-index: 19; transition: opacity 0.06s linear; }
+
+#crosshair { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 10; }
+#crosshair span { position: absolute; background: rgba(255,255,255,0.85); box-shadow: 0 0 2px rgba(0,0,0,0.6); }
+#crosshair span:first-child { left: 50%; top: 2px; bottom: 2px; width: 2px; margin-left: -1px; }
+#crosshair span:last-child { top: 50%; left: 2px; right: 2px; height: 2px; margin-top: -1px; }
+#crosshair.target span { background: #ffd23f; }
+
+#hud { position: fixed; inset: 0; pointer-events: none; z-index: 8; font-family: monospace; }
+#topbars { position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); }
+#hearts { display: flex; flex-wrap: wrap; justify-content: center; width: 280px; gap: 1px; }
+#hearts canvas { width: 18px; height: 18px; image-rendering: pixelated; filter: drop-shadow(1px 1px 0 rgba(0,0,0,0.6)); }
+#hearts canvas.dmg { animation: heartHit 0.3s ease-out; }
+@keyframes heartHit { 0% { transform: scale(1.35); } 100% { transform: scale(1); } }
+
+#chargeWrap { position: absolute; left: 50%; bottom: 122px; transform: translateX(-50%); width: 200px; height: 8px; background: rgba(0,0,0,0.4); border-radius: 4px; overflow: hidden; }
+#chargeFill { width: 0%; height: 100%; background: linear-gradient(90deg,#ffd23f,#ff8a3f); }
+
+#ammoText { position: absolute; left: 50%; bottom: 100px; transform: translateX(-50%); color: #fff; font-size: 12px; text-shadow: 1px 1px 2px #000; }
+
+#effectsBar { position: absolute; right: 12px; top: 12px; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; pointer-events: none; }
+.effectpill { display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.45); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 3px 8px 3px 4px; color: #fff; font-size: 12px; text-shadow: 1px 1px 2px #000; }
+.effectpill b { color: #ffd23f; }
+.effecticon { width: 20px; height: 20px; image-rendering: pixelated; flex: none; }
+
+#hotbarRow { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: flex-end; gap: 10px; }
+#hotbar { display: flex; gap: 4px; padding: 4px; background: rgba(0,0,0,0.35); border-radius: 6px; }
+#offhandSlot { margin-bottom: 4px; opacity: 0.85; transition: box-shadow 0.1s, border-color 0.1s, background 0.1s; }
+#offhandSlot .slotlabel { font-size: 7px; }
+#offhandSlot.blocking { opacity: 1; border-color: #7de3e0; background: rgba(125,227,224,0.28); box-shadow: 0 0 10px rgba(125,227,224,0.75); }
+#offhandSlot.stunned { opacity: 0.5; border-color: #e0432a; background: rgba(224,67,42,0.2); }
+#offhandSlot.stunned canvas { filter: grayscale(0.8); }
+.slot { position: relative; width: 48px; height: 48px; background: rgba(255,255,255,0.08); border: 2px solid rgba(255,255,255,0.25); border-radius: 4px; display: flex; align-items: center; justify-content: center; }
+.slot.active { border-color: #fff; background: rgba(255,255,255,0.22); box-shadow: 0 0 8px rgba(255,255,255,0.5); }
+.slot.empty { background: rgba(0,0,0,0.15); border-style: dashed; border-color: rgba(255,255,255,0.12); }
+.slot canvas { width: 40px; height: 40px; image-rendering: pixelated; transition: transform 0.1s; }
+.slot.active canvas { transform: scale(1.15); }
+.slot .count { position: absolute; right: 3px; bottom: 1px; font-size: 11px; color: #fff; text-shadow: 1px 1px 1px #000; font-weight: 700; }
+.slot .key { position: absolute; left: 3px; top: 1px; font-size: 10px; color: rgba(255,255,255,0.75); }
+
+#stats { position: absolute; right: 12px; top: 12px; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; color: #fff; font-size: 12px; text-shadow: 1px 1px 2px #000; }
+
+#killfeed { position: absolute; right: 12px; top: 60px; display: flex; flex-direction: column; gap: 3px; align-items: flex-end; }
+.kf { background: rgba(0,0,0,0.5); color: #fff; padding: 3px 8px; border-radius: 3px; font-size: 12px; animation: fadein 0.2s; }
+@keyframes fadein { from { opacity: 0; transform: translateY(-4px);} to { opacity: 1; transform: none; } }
+
+#chatWrap { position: absolute; left: 12px; bottom: 90px; width: 380px; pointer-events: none; }
+#chatLog { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.chatline { color: #fff; background: rgba(0,0,0,0.35); padding: 2px 6px; border-radius: 2px; font-size: 13px; width: fit-content; max-width: 100%; text-shadow: 1px 1px 1px #000; transition: opacity 1.5s; }
+.chatline.sys { color: #ffd23f; }
+.chatline.fade { opacity: 0.25; }
+#chatInput { pointer-events: auto; width: 100%; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.4); color: #fff; padding: 6px 8px; font-family: monospace; font-size: 13px; border-radius: 3px; }
+
+#scoreboard { position: absolute; right: 12px; bottom: 90px; width: 300px; background: rgba(0,0,0,0.55); border-radius: 4px; padding: 6px 8px; color: #fff; font-size: 12px; }
+#scoreboard table { width: 100%; border-collapse: collapse; }
+#scoreboard th { text-align: left; opacity: 0.7; font-weight: 400; padding-bottom: 3px; }
+#scoreboard td { padding: 2px 4px 2px 0; }
+#scoreboard tr.me { color: #ffd23f; font-weight: 700; }
+#scoreboard tr.dead { opacity: 0.45; }
+#scoreboard .tag { font-size: 9px; opacity: 0.7; }
+#scoreboard .tag.dummy { color: #7fd3ff; opacity: 0.9; }
+
+#hint { position: absolute; left: 50%; top: 16px; transform: translateX(-50%); color: #fff; background: rgba(0,0,0,0.45); padding: 6px 12px; border-radius: 4px; font-size: 12px; text-align: center; max-width: 90vw; }
+
+#deathScreen, #loading, #menu, #pauseMenu {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(20,0,0,0.75); z-index: 30; pointer-events: auto;
+}
+#loading { background: #1b2733; }
+#menu {
+  background: linear-gradient(160deg, #274b7a, #12202f);
+  flex-direction: column; gap: 16px; overflow-y: auto; padding: 24px 0;
+  /* flex-direction:column makes justify-content the vertical axis - with
+     plain "center" and content taller than the viewport, the classic
+     flexbox bug centers the *overflow* too, pushing the top of the panel
+     (title, name field) above y=0 and out of scroll range entirely. "safe
+     center" falls back to start-alignment whenever it would overflow, so
+     the panel just begins at the top and scrolls normally instead. */
+  justify-content: safe center;
+}
+#pauseMenu { background: rgba(10,10,15,0.7); z-index: 26; }
+#resumeBtn { margin-top: 20px; width: 100%; padding: 12px; font-size: 16px; font-weight: 700; border: none; border-radius: 5px; background: #4caf50; color: #fff; cursor: pointer; letter-spacing: 1px; }
+#resumeBtn:hover { background: #5cc760; }
+#leaveBtn { margin-top: 10px; }
+.panel { background: rgba(0,0,0,0.4); padding: 32px 40px; border-radius: 10px; text-align: center; color: #fff; min-width: 280px; }
+.panel.wide { min-width: 380px; max-width: 460px; }
+.panel h1 { margin: 0 0 8px; letter-spacing: 1px; }
+.panel .sub { opacity: 0.8; font-size: 13px; margin-top: 0; }
+.panel label { display: block; text-align: left; font-size: 12px; opacity: 0.8; margin: 14px 0 4px; }
+.panel input, .panel select { width: 100%; padding: 9px 10px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.08); color: #fff; font-family: monospace; font-size: 14px; }
+.panel input:focus, .panel select:focus { outline: none; border-color: #ffd23f; }
+.panel select option { background: #1b2733; color: #fff; }
+.panel label.checkline { display: flex; align-items: center; gap: 8px; font-size: 12px; opacity: 0.85; margin: 16px 0 4px; cursor: pointer; }
+.panel label.checkline input { width: auto; margin: 0; }
+.panel label.checkline.sub { margin: 4px 0 4px 24px; opacity: 0.7; font-size: 11px; }
+.itemchecklist {
+  max-height: 220px; overflow-y: auto; margin: 6px 0 14px; padding: 8px 10px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+}
+.itemchecklist label.itemcheck { margin: 3px 0; font-size: 12px; }
+.enchantgroup { margin: 12px 0; padding: 8px 10px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; text-align: left; }
+.enchantgroup h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: 0.5px; opacity: 0.85; text-transform: uppercase; }
+.enchantgroup label.checkline { margin: 6px 0; }
+#playBtn { margin-top: 20px; width: 100%; padding: 12px; font-size: 16px; font-weight: 700; border: none; border-radius: 5px; background: #4caf50; color: #fff; cursor: pointer; letter-spacing: 1px; }
+#playBtn:hover { background: #5cc760; }
+button.secondary { margin-top: 10px; width: 100%; padding: 9px; font-size: 12px; font-weight: 700; border: 1px solid rgba(255,255,255,0.3); border-radius: 5px; background: rgba(255,255,255,0.08); color: #fff; cursor: pointer; letter-spacing: 0.5px; }
+button.secondary:hover { background: rgba(255,255,255,0.18); }
+#resetTerrainMsg { margin-top: 8px; font-size: 11px; color: #ffd23f; text-align: center; }
+.controls { margin-top: 18px; font-size: 11px; opacity: 0.65; line-height: 1.6; text-align: left; }
+
+#loadingTrack { width: 320px; height: 10px; background: rgba(255,255,255,0.15); border-radius: 5px; overflow: hidden; margin-top: 10px; }
+#loadingBar { width: 0%; height: 100%; background: #ffd23f; transition: width 0.2s; }
+
+#inventory {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.55); z-index: 25; pointer-events: auto;
+}
+.invpanel { min-width: 400px; }
+.invpanel h1 { margin-bottom: 4px; }
+.invsection { margin-top: 16px; }
+.invlabel { text-align: left; font-size: 11px; opacity: 0.6; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
+.invrow { display: flex; gap: 4px; justify-content: center; }
+.invgrid { display: grid; grid-template-columns: repeat(9, 40px); gap: 4px; justify-content: center; }
+.invslot { width: 40px; height: 40px; }
+.invslot[draggable="true"] { cursor: grab; }
+.invslot.dragging { opacity: 0.35; }
+.invslot.dragover { outline: 2px dashed #ffd23f; outline-offset: 1px; }
+.invrow .invslot { width: 44px; height: 44px; }
+.slotlabel { font-size: 8px; opacity: 0.35; text-align: center; line-height: 1.2; pointer-events: none; }
+.invhint { margin-top: 18px; font-size: 11px; opacity: 0.55; }

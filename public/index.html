@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Blockcraft Arena</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div id="tags"></div>
+  <div id="flash"></div>
+  <div id="weatherFlash"></div>
+
+  <div id="crosshair"><span></span><span></span></div>
+
+  <div id="hud">
+    <div id="topbars">
+      <div id="hearts"></div>
+    </div>
+    <div id="chargeWrap" class="hidden"><div id="chargeFill"></div></div>
+    <div id="ammoText"></div>
+    <div id="effectsBar"></div>
+    <div id="hotbarRow">
+      <div class="slot" id="offhandSlot" title="Off-hand (empty)"><span class="slotlabel">Off-hand</span></div>
+      <div id="hotbar"></div>
+    </div>
+    <div id="stats"><span id="fps">0 fps</span><span id="pingText">0 ms</span></div>
+    <div id="killfeed"></div>
+    <div id="chatWrap">
+      <div id="chatLog"></div>
+      <input id="chatInput" class="hidden" maxlength="140" autocomplete="off" placeholder="Press Enter to chat...">
+    </div>
+    <div id="scoreboard">
+      <table>
+        <thead><tr><th>Player</th><th>K</th><th>D</th><th>Streak</th><th>Ping</th></tr></thead>
+        <tbody id="scoreboardBody"></tbody>
+      </table>
+    </div>
+    <div id="hint" class="hidden">Click to look around &middot; WASD move &middot; Space jump &middot; LMB attack/mine &middot; RMB use/place/block &middot; 1-9 or scroll to switch item &middot; E inventory &middot; Esc pause &middot; Tab scoreboard &middot; Enter chat</div>
+  </div>
+
+  <div id="pauseMenu" class="hidden">
+    <div class="panel">
+      <h1>Paused</h1>
+      <button id="resumeBtn">Resume</button>
+      <button id="leaveBtn" class="secondary">Leave to Menu</button>
+    </div>
+  </div>
+
+  <div id="inventory" class="hidden">
+    <div class="panel invpanel">
+      <h1>Inventory</h1>
+      <div class="invsection">
+        <div class="invlabel">Armor</div>
+        <div class="invrow" id="armorSlots">
+          <div class="slot invslot" data-armor="helmet"><span class="slotlabel">Helmet</span></div>
+          <div class="slot invslot" data-armor="chest"><span class="slotlabel">Chest</span></div>
+          <div class="slot invslot" data-armor="legs"><span class="slotlabel">Legs</span></div>
+          <div class="slot invslot" data-armor="boots"><span class="slotlabel">Boots</span></div>
+          <div class="slot invslot" id="invOffhandSlot"><span class="slotlabel">Off-hand</span></div>
+        </div>
+      </div>
+      <div class="invsection">
+        <div class="invlabel">Inventory</div>
+        <div class="invgrid" id="mainInventory"></div>
+      </div>
+      <div class="invsection">
+        <div class="invlabel">Hotbar</div>
+        <div class="invrow" id="invHotbar"></div>
+      </div>
+      <div class="invhint">Press E or Esc to close</div>
+    </div>
+  </div>
+
+  <div id="deathScreen" class="hidden">
+    <div class="panel">
+      <h1>YOU DIED</h1>
+      <p id="deathText"></p>
+      <p>Respawning in <span id="respawnTimer">3.0s</span></p>
+    </div>
+  </div>
+
+  <div id="loading">
+    <div class="panel">
+      <h1>Generating World&hellip;</h1>
+      <div id="loadingTrack"><div id="loadingBar"></div></div>
+    </div>
+  </div>
+
+  <div id="menu">
+    <div class="panel wide">
+      <h1>Blockcraft Arena</h1>
+      <p class="sub">A browser Minecraft-style kit PvP arena. Fight bots, or invite friends.</p>
+      <label>Name</label>
+      <input id="nameInput" maxlength="16" placeholder="Your name" autocomplete="off">
+      <label>Your kit</label>
+      <select id="kitSelect">
+        <option value="sword">Sword PvP (no axe or cobwebs)</option>
+        <option value="axe">Axe PvP (no cobwebs)</option>
+        <option value="web" selected>Web PvP (everything)</option>
+      </select>
+      <label class="checkline"><input type="checkbox" id="customLoadoutCheck"> Use a custom loadout instead (pick your own items below)</label>
+      <div id="customItemsList" class="hidden itemchecklist"></div>
+      <p class="sub">Enchantments (armor/sword/axe/bow) are in their own panel below.</p>
+      <label>Bots to fill the arena with (0-16)</label>
+      <input id="botsInput" type="number" min="0" max="16" value="4">
+      <label>Bot difficulty</label>
+      <select id="difficultySelect">
+        <option value="easy">Easy</option>
+        <option value="normal" selected>Normal</option>
+        <option value="hard">Hard</option>
+        <option value="random">Random (mixed)</option>
+      </select>
+      <label>Bot armor</label>
+      <select id="armorSelect">
+        <option value="none">None</option>
+        <option value="leather">Leather</option>
+        <option value="iron">Iron</option>
+        <option value="diamond" selected>Diamond (Protection IV)</option>
+      </select>
+      <label>Bot kit</label>
+      <select id="botKitSelect">
+        <option value="sword">Sword PvP (no axe or cobwebs)</option>
+        <option value="axe">Axe PvP (no cobwebs)</option>
+        <option value="web" selected>Web PvP (everything)</option>
+      </select>
+      <label class="checkline"><input type="checkbox" id="dummyCheck"> Add a training dummy (stationary, doesn't fight back)</label>
+      <label class="checkline sub"><input type="checkbox" id="dummyShieldCheck" checked> Training dummy holds a shield up</label>
+      <label class="checkline"><input type="checkbox" id="atkDummyCheck"> Add an attacking dummy (fixed facing, fights back with whatever weapon last hit it)</label>
+      <button id="playBtn">Play</button>
+      <button id="resetTerrainBtn" type="button" class="secondary">Reset Terrain</button>
+      <div id="resetTerrainMsg" class="hidden"></div>
+      <div class="controls">
+        <b>Controls</b> &mdash; WASD move &middot; Space jump &middot; Shift sneak &middot; Ctrl/R sprint &middot;
+        Left click attack / mine (hold with the spear to charge a stronger thrust) &middot; Right click place / shoot / throw a potion (splashes on impact, hold for bow &amp; apple) &middot;
+        hold Right click with sword/pickaxe/axe to raise your shield (blocks what's in front of you, but not hits from well above or below) &middot;
+        the axe hits harder, and its first hit through a raised shield still gets blocked but disables that shield for 3s &middot;
+        bots can wear a shield down too - repeated blocked hits in a row disable it (3 on Easy, 2 on Normal, 1 on Hard) &middot;
+        1-9 / scroll wheel switch item &middot; E inventory (drag items to/from your backpack) &middot; Enter chat &middot; Esc pause / release mouse
+        <br><br><b>Commands</b> &mdash; /bots &lt;0-16&gt; [difficulty] [armor] [kit] [weapon] &middot; /difficulty &lt;easy|normal|hard|random&gt; &middot;
+        /botarmor &lt;none|leather|iron|diamond&gt; &middot; /botkit &lt;sword|axe|web&gt; &middot; /botweapon &lt;fixed|versatile|full&gt; &middot;
+        /botteam &lt;on|off&gt; &middot; /kit &lt;sword|axe|web&gt; &middot; /botdiff &lt;bot name&gt; &lt;level&gt; &middot;
+        /dummy &lt;0-3&gt; &middot; /atkdummy &lt;0-3&gt;
+      </div>
+    </div>
+
+    <div class="panel wide" id="botBehaviorPanel">
+      <h1>Bot Behavior</h1>
+      <label>Bot weapons</label>
+      <select id="botWeaponSelect">
+        <option value="fixed" selected>One fixed weapon + shield</option>
+        <option value="versatile">Versatile (switches axe/sword, shield, bow, apples)</option>
+        <option value="full">Full kit (versatile + cobwebs, never builds)</option>
+      </select>
+      <label class="checkline"><input type="checkbox" id="botTeamCheck"> Bots work together against you (won't fight each other)</label>
+    </div>
+
+    <div class="panel wide" id="enchantPanel">
+      <h1>Enchantments</h1>
+      <p class="sub">Your gear either way is full diamond armor + every weapon in your kit - these just toggle which enchantments are active on them.</p>
+      <div id="enchantList"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/shared/blocks.js"></script>
+  <script src="/shared/worldgen.js"></script>
+  <script src="/shared/physics.js"></script>
+  <script src="js/gl.js"></script>
+  <script src="js/textures.js"></script>
+  <script src="js/mesher.js"></script>
+  <script src="js/world.js"></script>
+  <script src="js/entities.js"></script>
+  <script src="js/renderer.js"></script>
+  <script src="js/sound.js"></script>
+  <script src="js/net.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>
