@@ -70,10 +70,12 @@
     sendState(s) { if (this.socket) this.socket.volatile.emit('state', s); }
     attack(id, ids, charged) { if (this.socket) this.socket.emit('attack', Object.assign(ids ? { ids } : { id }, charged ? { charged: true } : null)); }
     swing() { if (this.socket) this.socket.emit('swing'); }
-    shoot(dx, dy, dz, power) { if (this.socket) this.socket.emit('shoot', { dx, dy, dz, power }); }
+    shoot(dx, dy, dz, power, firework) { if (this.socket) this.socket.emit('shoot', { dx, dy, dz, power, firework: !!firework }); }
     eat() { if (this.socket) this.socket.emit('eat'); }
     setBlock(x, y, z, id) { if (this.socket) this.socket.emit('setBlock', { x, y, z, id }); }
     ignite(x, y, z) { if (this.socket) this.socket.emit('ignite', { x, y, z }); }
+    hitCrystal(x, y, z) { if (this.socket) this.socket.emit('hitCrystal', { x, y, z }); }
+    chargeAnchor(x, y, z) { if (this.socket) this.socket.emit('chargeAnchor', { x, y, z }); }
     chat(text) { if (this.socket) this.socket.emit('chat', text); }
   }
 

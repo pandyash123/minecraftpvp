@@ -11,11 +11,19 @@ body { font-family: 'Segoe UI', Verdana, monospace; user-select: none; }
   pointer-events: none;
 }
 .nametag-name {
-  color: #fff; font-size: 13px; font-weight: 700; text-shadow: 1px 1px 2px #000, 0 0 4px #000;
+  color: #fff; font-size: 13px; font-weight: 700;
+  text-shadow: 1px 1px 2px #000, 0 0 4px #000, 0 0 6px #ff2a2a, 0 0 10px #ff2a2a;
   white-space: nowrap;
 }
 .nametag-hp-wrap { width: 52px; height: 5px; background: rgba(0,0,0,0.55); border: 1px solid rgba(0,0,0,0.7); border-radius: 2px; overflow: hidden; }
 .nametag-hp { height: 100%; width: 100%; background: #4caf50; transition: width 0.15s ease-out, background 0.2s; }
+
+.dmgnum {
+  position: absolute; transform: translate(-50%, -100%);
+  pointer-events: none; white-space: nowrap;
+  color: #fff923; font-size: 20px; font-weight: 800; font-family: 'Segoe UI', Verdana, monospace;
+  text-shadow: 1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000, 0 0 8px #ff6a00;
+}
 
 #flash { position: fixed; inset: 0; background: #ff2020; opacity: 0; pointer-events: none; z-index: 20; transition: opacity 0.05s linear; }
 #weatherFlash { position: fixed; inset: 0; background: #ffffff; opacity: 0; pointer-events: none; z-index: 19; transition: opacity 0.06s linear; }

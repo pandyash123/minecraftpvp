@@ -34,7 +34,7 @@
         botWeaponSelect: el('botWeaponSelect'), botTeamCheck: el('botTeamCheck'),
         difficultySelect: el('difficultySelect'), armorSelect: el('armorSelect'), dummyCheck: el('dummyCheck'),
         dummyShieldCheck: el('dummyShieldCheck'),
-        atkDummyCheck: el('atkDummyCheck'), resetTerrainBtn: el('resetTerrainBtn'), resetTerrainMsg: el('resetTerrainMsg'),
+        atkDummyCheck: el('atkDummyCheck'), dmgNumbersCheck: el('dmgNumbersCheck'), resetTerrainBtn: el('resetTerrainBtn'), resetTerrainMsg: el('resetTerrainMsg'),
         inventory: el('inventory'), mainInventory: el('mainInventory'), invHotbar: el('invHotbar'),
         pauseMenu: el('pauseMenu'), resumeBtn: el('resumeBtn'), leaveBtn: el('leaveBtn'),
         customLoadoutCheck: el('customLoadoutCheck'), customItemsList: el('customItemsList'),
@@ -54,6 +54,7 @@
       this.projectiles = new Map();
       this.particlesMeta = [];      // {x,y,z,vx,vy,vz,r,g,b,a,size,life}
       this._groundFires = [];       // {x,y,z,until} - cosmetic only, see 'groundfire' effect
+      this._damageNumbers = [];     // {x,y,z,node,born} - floating hit numbers, see _spawnDamageNumber()
 
       this.keys = {};
       this.mouseDown = { left: false, right: false };
@@ -134,7 +135,7 @@
     _buildEnchantMenu() {
       const list = this.hud.enchantList;
       if (!list) return;
-      const SLOT_TITLE = { armor: 'Armor', sword: 'Sword', axe: 'Axe', bow: 'Bow', trident: 'Trident', stick: 'Stick', pick: 'Pickaxe' };
+      const SLOT_TITLE = { armor: 'Armor', sword: 'Sword', axe: 'Axe', bow: 'Bow', trident: 'Trident', stick: 'Stick', pick: 'Pickaxe', mace: 'Mace' };
       list.innerHTML = '';
       for (const slot in MC.ENCHANT_DEFS) {
         const group = document.createElement('div');
@@ -276,6 +277,23 @@
       this.yaw = this.me.yaw; this.pitch = 0;
       this.ammo = init.ammo;
       this.weather = init.weather || 'clear';
+      this.gliding = false;
+      // Offhand: 'shield' (the default, no real inventory slot of its own)
+      // or a firework/block/totem item key dragged there in the inventory
+      // screen - see _wireOffhandDrag(). Synced to the server (the 'oh'
+      // field in _sendState) since Totem of Undying only actually saves you
+      // while equipped here, not just sitting in the backpack.
+      this.offhand = 'shield';
+      // Chest slot: 'chestplate' (default) or 'elytra' - right-click the
+      // elytra (or drag it onto the chest armor slot in the inventory) to
+      // swap it in. Synced via the 'ch' field in _sendState - wearing it
+      // gives up the chestplate's defense/toughness (see server.js's
+      // applyDamage), and gliding requires it to actually be worn here now,
+      // not just held.
+      this.chestSlot = 'chestplate';
+      // Purely a local display preference (chosen at the menu) - floating
+      // damage numbers for your own outgoing hits, see net.on('hitmarker').
+      this.showDamageNumbers = !!(this.hud.dmgNumbersCheck && this.hud.dmgNumbersCheck.checked);
 
       this.remote.clear();
       for (const p of init.players) if (p.id !== this.me.id) this._ensureRemote(p);
@@ -329,6 +347,8 @@
       this.projectiles.clear();
       this.particlesMeta.length = 0;
       this._groundFires.length = 0;
+      for (const d of this._damageNumbers) d.node.remove();
+      this._damageNumbers.length = 0;
       if (this._tags) { for (const t of this._tags.values()) t.node.remove(); this._tags.clear(); }
       this.hud.chatLog.innerHTML = '';
       this.killfeedItems = [];
@@ -348,6 +368,9 @@
       this._hasEverLocked = false;
       this.weather = 'clear';
       this._lightningFlashT = 0;
+      this.gliding = false;
+      this.offhand = 'shield';
+      this.chestSlot = 'chestplate';
 
       this.me = null;
       this.world = null;
@@ -388,7 +411,15 @@
     _wireNetEvents() {
       const net = this.net;
       net.on('playerJoin', p => { if (p.id !== this.me.id) { this._ensureRemote(p); this._log(p.name + ' joined'); } });
-      net.on('playerLeave', d => { this.remote.delete(d.id); });
+      net.on('playerLeave', d => {
+        this.remote.delete(d.id);
+        // Their nametag DOM node otherwise lingers forever on screen - only
+        // _drawNameTag() ever adds one, nothing was ever removing it.
+        if (this._tags) {
+          const tag = this._tags.get(d.id);
+          if (tag) { tag.node.remove(); this._tags.delete(d.id); }
+        }
+      });
       net.on('chat', m => this._log(m.system ? m.text : (m.name + ': ' + m.text), m.system));
       net.on('scores', s => {
         this.scores = s; this._renderScoreboard();
@@ -451,7 +482,14 @@
         }
         if (d.kb) { this.me.vx += d.kb.x * 6; this.me.vz += d.kb.z * 6; if (d.kb.y) this.me.vy = Math.min(10, Math.max(this.me.vy, d.kb.y * 9)); }
       });
-      net.on('heal', d => { this.me.health = d.health; this.me.absorption = d.absorption; if (d.ammo) this.ammo = d.ammo; this._updateHealthUI(); this._updateAmmoUI(); });
+      net.on('heal', d => {
+        this.me.health = d.health; this.me.absorption = d.absorption;
+        if (d.ammo) this.ammo = d.ammo;
+        // A totem save consumes the one in the offhand - once its ammo runs
+        // out there's nothing left to hold there, so fall back to the shield.
+        if (this.offhand === 'totem' && (!this.ammo || !this.ammo.totem)) { this.offhand = 'shield'; this._renderOffhandSlot(); }
+        this._updateHealthUI(); this._updateAmmoUI();
+      });
       net.on('killreward', d => { this.me.health = d.health; this.ammo = d.ammo; this._updateHealthUI(); this._updateAmmoUI(); global.MCSound.kill(); });
       net.on('ammo', d => { this.ammo = d; this._updateAmmoUI(); });
       net.on('effects', d => this._applyEffectsSnapshot(d));
@@ -459,7 +497,11 @@
         if (d.id === this.me.id) { this.me.health = d.health; this.me.absorption = d.absorption; this._updateHealthUI(); }
         else { const r = this.remote.get(d.id); if (r) r.health = d.health; }
       });
-      net.on('hitmarker', d => { this.hitmarkerT = 0.35; global.MCSound.hit(); });
+      net.on('hitmarker', d => {
+        this.hitmarkerT = 0.35;
+        global.MCSound.hit();
+        if (this.showDamageNumbers && d.dealt > 0) this._spawnDamageNumber(d.x, d.y, d.z, d.dealt);
+      });
       net.on('arrowHit', () => global.MCSound.arrowHit());
       net.on('swing', d => { const r = this.remote.get(d.id); if (r) { r.swingT = 0.001; } });
       net.on('effect', d => this._spawnEffect(d));
@@ -514,7 +556,7 @@
         const r = this._ensureRemote({ id, name: id, x, y, z, yaw, pitch, health, alive, slot, bot: String(id).startsWith('bot') || isDummy, dummy: isDummy });
         r.tx = x; r.ty = y; r.tz = z; r.tyaw = yaw; r.tpitch = pitch;
         r.health = health; r.alive = !!alive; r.slot = slot;
-        r.sneak = !!(flags & 1); r.sprint = !!(flags & 2); r.blocking = !!(flags & 4); r.burning = !!(flags & 8); r.hasEffect = !!(flags & 16);
+        r.sneak = !!(flags & 1); r.sprint = !!(flags & 2); r.blocking = !!(flags & 4); r.burning = !!(flags & 8); r.hasEffect = !!(flags & 16); r.gliding = !!(flags & 32);
         r.vx = vx; r.vz = vz;
         r.snapT = now;
       }
@@ -656,9 +698,12 @@
     _buildInventoryUI() {
       if (!this._armorBuilt) {
         this._armorBuilt = true;
-        const armorMap = { helmet: 'helmet', chest: 'chestplate', legs: 'leggings', boots: 'boots' };
+        // Helmet/legs/boots are the fixed kit, filled once and never change.
+        // Chest is dynamic (chestplate or elytra) - see _renderChestSlot().
+        const armorMap = { helmet: 'helmet', legs: 'leggings', boots: 'boots' };
         document.querySelectorAll('#armorSlots [data-armor]').forEach(slot => {
           const key = armorMap[slot.dataset.armor];
+          if (!key) return;
           const piece = MC.ARMOR[key];
           slot.innerHTML = '';
           slot.appendChild(global.MCTextures.itemIcon(key, 36));
@@ -668,15 +713,79 @@
           slot.appendChild(tag);
           slot.title = piece.name + ' — Protection IV';
         });
-        const offhand = el('invOffhandSlot');
-        offhand.innerHTML = '';
-        offhand.appendChild(global.MCTextures.itemIcon('shield', 36));
-        offhand.title = MC.SHIELD.name;
+        this._wireOffhandDrag(el('invOffhandSlot'));
+        const chestEl = document.querySelector('#armorSlots [data-armor="chest"]');
+        if (chestEl) this._wireChestDrag(chestEl);
       }
+      this._renderOffhandSlot();
+      this._renderChestSlot();
       if (this.renderer) {
         this._renderSlotZone(this.hud.invHotbar, 'hotbar', this.hotbarSlots);
         this._renderSlotZone(this.hud.mainInventory, 'backpack', this.backpackSlots);
       }
+    }
+
+    /** Redraws the chest armor slot from `this.chestSlot` - chestplate
+     * (fixed Protection IV, like the other 3 pieces) or the elytra, if
+     * equipped. Mirrors _renderOffhandSlot()'s shape. */
+    _renderChestSlot() {
+      const chestEl = document.querySelector('#armorSlots [data-armor="chest"]');
+      if (!chestEl) return;
+      chestEl.innerHTML = '';
+      const label = document.createElement('span');
+      label.className = 'slotlabel';
+      label.textContent = 'Chest';
+      chestEl.appendChild(label);
+      if (this.chestSlot === 'elytra') {
+        chestEl.appendChild(global.MCTextures.itemIcon('elytra', 36));
+        chestEl.title = 'Elytra (drag out, or right-click it, to swap the chestplate back in)';
+      } else {
+        chestEl.appendChild(global.MCTextures.itemIcon('chestplate', 36));
+        const tag = document.createElement('div');
+        tag.className = 'count';
+        tag.textContent = 'IV';
+        chestEl.appendChild(tag);
+        chestEl.title = MC.ARMOR.chestplate.name + ' — Protection IV (drag the elytra here, or right-click it, to swap it in)';
+      }
+      chestEl.draggable = this.chestSlot === 'elytra';
+    }
+
+    /** Whether `item` is allowed in the offhand slot - shield (the default)
+     * plus firework/block/totem, same restriction in both the inventory
+     * screen's offhand slot and the in-game HUD icon below it. */
+    _canOffhand(item) {
+      return item && (item.type === 'firework' || item.type === 'block' || item.type === 'totem');
+    }
+
+    /** Redraws the inventory screen's offhand slot from `this.offhand` -
+     * called on every _buildInventoryUI() (ammo counts change) in addition
+     * to whenever the offhand item itself changes. */
+    _renderOffhandSlot() {
+      const el2 = el('invOffhandSlot');
+      if (!el2) return;
+      el2.innerHTML = '';
+      const label = document.createElement('span');
+      label.className = 'slotlabel';
+      label.textContent = 'Off-hand';
+      el2.appendChild(label);
+      if (this.offhand === 'shield') {
+        el2.appendChild(global.MCTextures.itemIcon('shield', 36));
+        el2.title = MC.SHIELD.name + ' (drag a firework, block, or totem here to swap it in)';
+      } else {
+        const item = ITEMS.find(i => i.key === this.offhand);
+        const icon = item.type === 'block' && this.renderer ? global.MCTextures.blockIcon(this.renderer.tiles, item.block, 36) : global.MCTextures.itemIcon(item.key, 36);
+        el2.appendChild(icon);
+        if (item.ammo !== undefined) {
+          const count = document.createElement('div');
+          count.className = 'count';
+          count.textContent = this.ammo ? this.ammo[item.key] : item.ammo;
+          el2.appendChild(count);
+        }
+        el2.title = item.name + ' (drag out to swap the shield back in)';
+      }
+      el2.classList.toggle('empty', false);
+      el2.draggable = this.offhand !== 'shield';
+      this._buildOffhandHUD();
     }
 
     /** Builds one draggable slot grid (hotbar mirror or backpack) from a
@@ -687,9 +796,19 @@
       container.innerHTML = '';
       arr.forEach((idx, pos) => {
         const cell = document.createElement('div');
-        cell.className = 'slot invslot' + (idx !== null && idx === this.me.slot ? ' active' : '') + (idx === null ? ' empty' : '');
+        // 'chestplate' is a placeholder (not a real ITEMS index) left behind
+        // when the elytra gets equipped in its place - see _wireChestDrag().
+        const isChestplate = idx === 'chestplate';
+        cell.className = 'slot invslot' + (typeof idx === 'number' && idx === this.me.slot ? ' active' : '') + (idx === null ? ' empty' : '');
         cell.dataset.pos = pos;
-        if (idx !== null) {
+        if (isChestplate) {
+          cell.appendChild(global.MCTextures.itemIcon('chestplate', 36));
+          const tag = document.createElement('div');
+          tag.className = 'count';
+          tag.textContent = 'IV';
+          cell.appendChild(tag);
+          cell.title = MC.ARMOR.chestplate.name + ' — Protection IV (drag back onto the chest armor slot to re-equip it)';
+        } else if (idx !== null) {
           const item = ITEMS[idx];
           const icon = item.type === 'block' ? global.MCTextures.blockIcon(tiles, item.block, 36) : global.MCTextures.itemIcon(item.key, 36);
           cell.appendChild(icon);
@@ -715,7 +834,18 @@
      * not whether it's sitting in the hotbar or tucked in the backpack. */
     _wireSlotDrag(cell, zone, pos) {
       const idx = this._slotArray(zone)[pos];
-      if (idx !== null) {
+      if (idx === 'chestplate') {
+        // The displaced-chestplate placeholder: only draggable back onto
+        // the chest armor slot (see _wireChestDrag()), not swappable with
+        // ordinary items.
+        cell.draggable = true;
+        cell.addEventListener('dragstart', e => {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', 'chestplate-return:' + zone + ':' + pos);
+          cell.classList.add('dragging');
+        });
+        cell.addEventListener('dragend', () => cell.classList.remove('dragging'));
+      } else if (idx !== null) {
         cell.draggable = true;
         cell.addEventListener('dragstart', e => {
           e.dataTransfer.effectAllowed = 'move';
@@ -730,11 +860,51 @@
         e.preventDefault();
         cell.classList.remove('dragover');
         const raw = e.dataTransfer.getData('text/plain') || '';
+        if (raw.startsWith('chestplate-return:')) return; // only the chest armor slot accepts this
+        if (raw === 'offhand') {
+          // Pulling the offhand item back out - it always lands here (this
+          // is where the drop happened), swapping out whatever was here.
+          // Rejected if this slot holds the chestplate placeholder - that
+          // one only ever goes back to the chest armor slot.
+          if (this.offhand === 'shield') return;
+          const toArr = this._slotArray(zone);
+          if (toArr[pos] === 'chestplate') return;
+          const outgoing = ITEMS.findIndex(i => i.key === this.offhand);
+          this.offhand = toArr[pos] !== null ? ITEMS[toArr[pos]].key : 'shield';
+          if (this.offhand !== 'shield' && !this._canOffhand(ITEMS[ITEMS.findIndex(i => i.key === this.offhand)])) {
+            // Whatever was sitting in this slot isn't offhand-eligible -
+            // just drop the totem/firework/block back in this slot instead
+            // of swapping something invalid into the offhand.
+            this.offhand = 'shield';
+          }
+          toArr[pos] = outgoing;
+          this._renderOffhandSlot();
+          this._buildInventoryUI();
+          this._buildHotbar();
+          return;
+        }
+        if (raw === 'chest') {
+          // Pulling the elytra back out of the chest slot - lands here if
+          // this slot is empty, or currently holds the displaced chestplate
+          // placeholder (which then returns to the chest armor slot).
+          if (this.chestSlot !== 'elytra') return;
+          const toArr = this._slotArray(zone);
+          if (toArr[pos] !== null && toArr[pos] !== 'chestplate') return;
+          toArr[pos] = ITEMS.findIndex(i => i.key === 'elytra');
+          this.chestSlot = 'chestplate';
+          this._renderChestSlot();
+          this._buildInventoryUI();
+          this._buildHotbar();
+          return;
+        }
         const [fromZone, fromPosStr] = raw.split(':');
         const fromPos = parseInt(fromPosStr, 10);
         if ((fromZone !== 'hotbar' && fromZone !== 'backpack') || !Number.isInteger(fromPos)) return;
         if (fromZone === zone && fromPos === pos) return;
         const fromArr = this._slotArray(fromZone), toArr = this._slotArray(zone);
+        // Never let an ordinary item get swapped onto the chestplate
+        // placeholder - it only ever goes back to the chest armor slot.
+        if (toArr[pos] === 'chestplate' || fromArr[fromPos] === 'chestplate') return;
         const tmp = toArr[pos];
         toArr[pos] = fromArr[fromPos];
         fromArr[fromPos] = tmp;
@@ -743,9 +913,109 @@
       });
     }
 
+    /** Drag-and-drop for the single offhand slot - accepts a firework,
+     * block, or totem dragged in from the hotbar/backpack (swapping the
+     * previous offhand occupant, if any, into the slot it came from), and
+     * lets the current offhand item be dragged back out the same way. */
+    _wireOffhandDrag(cell) {
+      cell.addEventListener('dragstart', e => {
+        if (this.offhand === 'shield') { e.preventDefault(); return; }
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', 'offhand');
+        cell.classList.add('dragging');
+      });
+      cell.addEventListener('dragend', () => cell.classList.remove('dragging'));
+      cell.addEventListener('dragover', e => { e.preventDefault(); cell.classList.add('dragover'); });
+      cell.addEventListener('dragleave', () => cell.classList.remove('dragover'));
+      cell.addEventListener('drop', e => {
+        e.preventDefault();
+        cell.classList.remove('dragover');
+        const raw = e.dataTransfer.getData('text/plain') || '';
+        if (raw === 'offhand') return;
+        const [fromZone, fromPosStr] = raw.split(':');
+        const fromPos = parseInt(fromPosStr, 10);
+        if ((fromZone !== 'hotbar' && fromZone !== 'backpack') || !Number.isInteger(fromPos)) return;
+        const fromArr = this._slotArray(fromZone);
+        const idx = fromArr[fromPos];
+        if (idx === null || !this._canOffhand(ITEMS[idx])) return;
+        const incoming = ITEMS[idx].key;
+        const outgoingKey = this.offhand;
+        fromArr[fromPos] = outgoingKey === 'shield' ? null : ITEMS.findIndex(i => i.key === outgoingKey);
+        this.offhand = incoming;
+        this._renderOffhandSlot();
+        this._buildInventoryUI();
+        this._buildHotbar();
+      });
+    }
+
+    /** Drag-and-drop for the chest armor slot - only the elytra can be
+     * dragged in (swapping the chestplate back into whatever slot it came
+     * from), and it can be dragged back out the same way. Mirrors
+     * _wireOffhandDrag()'s shape. */
+    _wireChestDrag(cell) {
+      cell.addEventListener('dragstart', e => {
+        if (this.chestSlot !== 'elytra') { e.preventDefault(); return; }
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', 'chest');
+        cell.classList.add('dragging');
+      });
+      cell.addEventListener('dragend', () => cell.classList.remove('dragging'));
+      cell.addEventListener('dragover', e => { e.preventDefault(); cell.classList.add('dragover'); });
+      cell.addEventListener('dragleave', () => cell.classList.remove('dragover'));
+      cell.addEventListener('drop', e => {
+        e.preventDefault();
+        cell.classList.remove('dragover');
+        const raw = e.dataTransfer.getData('text/plain') || '';
+        if (raw === 'chest' || raw === 'offhand') return;
+        if (raw.startsWith('chestplate-return:')) {
+          // Dragging the displaced-chestplate placeholder back onto the
+          // chest slot: re-equip it, and send the elytra back to wherever
+          // the placeholder was sitting.
+          const [, fromZone, fromPosStr] = raw.split(':');
+          const fromPos = parseInt(fromPosStr, 10);
+          if ((fromZone !== 'hotbar' && fromZone !== 'backpack') || !Number.isInteger(fromPos)) return;
+          if (this.chestSlot !== 'elytra') return;
+          const fromArr = this._slotArray(fromZone);
+          if (fromArr[fromPos] !== 'chestplate') return;
+          fromArr[fromPos] = ITEMS.findIndex(i => i.key === 'elytra');
+          this.chestSlot = 'chestplate';
+          this._renderChestSlot();
+          this._buildInventoryUI();
+          this._buildHotbar();
+          return;
+        }
+        const [fromZone, fromPosStr] = raw.split(':');
+        const fromPos = parseInt(fromPosStr, 10);
+        if ((fromZone !== 'hotbar' && fromZone !== 'backpack') || !Number.isInteger(fromPos)) return;
+        const fromArr = this._slotArray(fromZone);
+        const idx = fromArr[fromPos];
+        if (idx === null || idx === 'chestplate' || ITEMS[idx].key !== 'elytra') return;
+        // The displaced chestplate takes the elytra's old slot, same shape
+        // as the offhand's shield/item swap.
+        fromArr[fromPos] = 'chestplate';
+        this.chestSlot = 'elytra';
+        // If it was the actively-held item, it's no longer sitting in any
+        // hotbar slot to show as "active" - switch back to the primary
+        // weapon instead of leaving the hotbar looking empty.
+        if (this.me.slot === idx) this.me.slot = 0;
+        this._renderChestSlot();
+        this._buildInventoryUI();
+        this._buildHotbar();
+      });
+    }
+
     _onLeftDown() {
       if (!this.me || !this.me.alive) return;
       const item = ITEMS[this.me.slot];
+      // Hitting an end crystal detonates it, regardless of what's held -
+      // checked first since it's block-aimed (a precise raycast), not the
+      // forgiving nearby-player melee targeting below.
+      const pick = this._pick();
+      if (pick && pick.type === 'block' && pick.block.block === ID.END_CRYSTAL && pick.dist <= C.REACH_ATTACK) {
+        this.net.hitCrystal(pick.block.x, pick.block.y, pick.block.z);
+        this._swingLocal();
+        return;
+      }
       if (item.type === 'weapon' || item.type === 'tool') {
         if (item.pierce) {
           // The spear's Lunge fires on every swing, landed hit or not - so
@@ -797,6 +1067,26 @@
         this.ammo.pearl--; this._updateAmmoUI();
         this._swingLocal();
       } else if (item.type === 'block') {
+        // Glowstone aimed at a respawn anchor charges it instead of placing
+        // a normal block - anything else, it places like any other block.
+        if (item.key === 'glowstone') {
+          const pick = this._pick();
+          const exact = (pick && pick.type === 'block' && pick.block.block === ID.RESPAWN_ANCHOR && pick.dist <= C.REACH_BLOCK) ? pick.block : null;
+          // Fall back to a forgiving nearby-anchor search (same idea as
+          // _pickAttackTarget's forgiving melee targeting) if the strict
+          // raycast doesn't land exactly on the anchor's block face - lets
+          // charging work without needing pixel-perfect aim.
+          const anchor = exact || this._findNearbyAnchor(C.REACH_BLOCK);
+          if (anchor) {
+            const t = performance.now();
+            if ((item.ammo !== undefined && this.ammo.glowstone <= 0) || t - this.lastPlaceAt < 180) return;
+            this.lastPlaceAt = t;
+            this.net.chargeAnchor(anchor.x, anchor.y, anchor.z);
+            if (item.ammo !== undefined) { this.ammo.glowstone--; this._updateAmmoUI(); }
+            global.MCSound.click();
+            return;
+          }
+        }
         this._placeBlock();
       } else if (item.type === 'windcharge') {
         const t = performance.now();
@@ -837,6 +1127,41 @@
         this._swingLocal();
       } else if (item.type === 'igniter') {
         this._useFlintSteel();
+      } else if (item.type === 'elytra' && this.chestSlot !== 'elytra') {
+        // Equip it in place of the chestplate - relocates it out of
+        // whichever hotbar/backpack slot it's currently held from (replaced
+        // by a chestplate placeholder you can drag back to swap again),
+        // same thing dragging it onto the chest armor slot does. Once worn
+        // it's no longer a selectable held item, so un-equipping only
+        // happens through the inventory drag (either direction).
+        let arr = this.hotbarSlots, arrPos = arr.indexOf(this.me.slot);
+        if (arrPos === -1) { arr = this.backpackSlots; arrPos = arr.indexOf(this.me.slot); }
+        if (arrPos !== -1) arr[arrPos] = 'chestplate';
+        this.chestSlot = 'elytra';
+        // The item just worn is no longer sitting in any hotbar slot to show
+        // as "active" - switch back to the primary weapon instead of
+        // leaving the hotbar looking like nothing is held.
+        this.me.slot = 0;
+        this._renderChestSlot();
+        this._buildHotbar();
+        if (this.inventoryOpen) this._buildInventoryUI();
+        global.MCSound.click();
+      } else if (item.type === 'firework') {
+        // Only does anything while gliding (a forward speed boost) - firing
+        // one as a weapon now requires a crossbow (see the crossbow branch
+        // below, Shift+RMB), not just holding the firework itself.
+        if (!this.gliding) return;
+        const t = performance.now();
+        if (this.ammo.firework <= 0 || t - (this._lastFireworkAt || 0) < item.cooldown * 1000) return;
+        this._lastFireworkAt = t;
+        const dir = this._lookDir();
+        this.net.shoot(dir[0], dir[1], dir[2], 1);
+        this.ammo.firework--; this._updateAmmoUI();
+        this._swingLocal();
+        this.me.vx += dir[0] * C.FIREWORK_BOOST_SPEED;
+        this.me.vy += dir[1] * C.FIREWORK_BOOST_SPEED;
+        this.me.vz += dir[2] * C.FIREWORK_BOOST_SPEED;
+        global.MCSound.fireworkLaunch();
       }
       // bow charging is handled continuously in update() via rightDownAt
     }
@@ -861,7 +1186,16 @@
       const item = ITEMS[this.me.slot];
       if (item.type === 'bow' || item.type === 'crossbow') {
         const held = (performance.now() - this.rightDownAt) / 1000;
-        if (this.ammo.arrow > 0 && held > 0.08) {
+        // Shift+RMB with a crossbow out fires a firework rocket instead of
+        // an arrow (uses firework ammo, not arrow ammo) - this is the only
+        // way to fire one as a weapon now, plain RMB is always arrows.
+        const fireworkMode = item.key === 'crossbow' && this.me.sneak && this.ammo.firework > 0;
+        if (fireworkMode && held > 0.08) {
+          const dir = this._lookDir();
+          this.net.shoot(dir[0], dir[1], dir[2], 1, true);
+          this.ammo.firework--; this._updateAmmoUI();
+          this._swingLocal();
+        } else if (!fireworkMode && this.ammo.arrow > 0 && held > 0.08) {
           const power = clamp(held / item.drawTime, 0.12, 1);
           const dir = this._lookDir();
           this.net.shoot(dir[0], dir[1], dir[2], power);
@@ -970,6 +1304,37 @@
         if (blockHit) continue;
         const score = dot * 2 - dist * 0.12;
         if (score > bestScore) { bestScore = score; best = r; }
+      }
+      return best;
+    }
+
+    /**
+     * Forgiving respawn-anchor targeting: nearest one within reach and
+     * roughly in front of the camera, same shape as _pickAttackTarget above
+     * - a strict raycast hit on the exact block face misses constantly at
+     * charging range (you're standing right next to it), so glowstone
+     * charging shouldn't require pixel-perfect aim either.
+     */
+    _findNearbyAnchor(reach) {
+      const eye = [this.me.x, this.me.y + PHYS.EYE, this.me.z];
+      const dir = this._lookDir();
+      const r = Math.ceil(reach);
+      const px = Math.floor(this.me.x), py = Math.floor(this.me.y), pz = Math.floor(this.me.z);
+      let best = null, bestScore = -Infinity;
+      for (let bx = px - r; bx <= px + r; bx++) {
+        for (let by = py - r; by <= py + r; by++) {
+          for (let bz = pz - r; bz <= pz + r; bz++) {
+            if (this.world.get(bx, by, bz) !== ID.RESPAWN_ANCHOR) continue;
+            const cx = bx + 0.5, cy = by + 0.5, cz = bz + 0.5;
+            const dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
+            const dist = Math.hypot(dx, dy, dz);
+            if (dist > reach) continue;
+            const dot = (dx * dir[0] + dy * dir[1] + dz * dir[2]) / (dist || 1);
+            if (dot < 0.5) continue; // ~60 degree cone - forgiving but still "in front"
+            const score = dot * 2 - dist * 0.12;
+            if (score > bestScore) { bestScore = score; best = { x: bx, y: by, z: bz }; }
+          }
+        }
       }
       return best;
     }
@@ -1126,7 +1491,10 @@
       const forward = (inv || lunging) ? 0 : (this.keys.KeyW ? 1 : 0) - (this.keys.KeyS ? 1 : 0);
       const strafe = (inv || lunging) ? 0 : (this.keys.KeyD ? 1 : 0) - (this.keys.KeyA ? 1 : 0);
       const sneak = !inv && !!this.keys.ShiftLeft;
-      const sprint = !inv && (!!this.keys.ControlLeft || !!this.keys.KeyR);
+      // ControlLeft used to also trigger sprint, but holding it with W to
+      // sprint-forward is literally the browser's "close tab" shortcut -
+      // dropped it in favor of purely safe keys.
+      const sprint = !inv && (!!this.keys.KeyR || !!this.keys.CapsLock);
       const jump = !inv && !!this.keys.Space;
       this.me.yaw = this.yaw; this.me.pitch = this.pitch;
       // A raised shield takes both hands like in vanilla - no sprinting
@@ -1149,10 +1517,21 @@
       if (speedEff && nowMs < speedEff.until) speedMult += C.SPEED_PCT_PER_LEVEL * speedEff.level;
       if (slowEff && nowMs < slowEff.until) speedMult = Math.max(0.05, speedMult - C.SLOWNESS_PCT_PER_LEVEL * slowEff.level);
 
+      // Elytra: jump while airborne starts a glide - matches vanilla's
+      // forgiving activation (you don't need to already be falling fast,
+      // just off the ground - walk off a ledge and tap jump). Driven by
+      // whether it's actually worn in the chest slot now (not just held/
+      // selected). Once started it keeps going regardless of what's
+      // selected afterward, until landing or sneaking cancels it.
+      if (!this.gliding && !inv && this.chestSlot === 'elytra' && !this.me.onGround && this.me.vy <= 0.5 && jump) {
+        this.gliding = true;
+      }
+      if (this.gliding && (this.me.onGround || sneak)) this.gliding = false;
+
       const wasGround = this.me.onGround;
       const prevY = this.me.y;
       Physics.step((x, y, z) => this.world.get(x, y, z), this.me,
-        { forward, strafe, jump, sneak: this.me.sneak, sprint: this.me.sprint, block: this.me.blocking, yaw: this.yaw, dashing: lunging, speedMult }, dt);
+        { forward, strafe, jump, sneak: this.me.sneak, sprint: this.me.sprint, block: this.me.blocking, yaw: this.yaw, pitch: this.pitch, dashing: lunging, glide: this.gliding, speedMult }, dt);
 
       if (!wasGround && this.me.onGround) {
         const fell = prevY - this.me.y;
@@ -1176,7 +1555,7 @@
         x: this.me.x, y: this.me.y, z: this.me.z,
         vx: this.me.vx, vy: this.me.vy, vz: this.me.vz,
         yaw: this.me.yaw, pitch: this.me.pitch,
-        g: this.me.onGround, sn: this.me.sneak, sp: this.me.sprint, bl: this.me.blocking, slot: this.me.slot
+        g: this.me.onGround, sn: this.me.sneak, sp: this.me.sprint, bl: this.me.blocking, slot: this.me.slot, gl: this.gliding, oh: this.offhand, ch: this.chestSlot
       });
     }
 
@@ -1423,6 +1802,79 @@
         this._lightningFlashT = Math.max(this._lightningFlashT || 0, clamp(0.35 - dist / 45, 0, 0.35));
         this._shakeT = Math.max(this._shakeT || 0, clamp(0.5 - dist / 30, 0, 0.5));
         global.MCSound.explosion();
+      } else if (d.kind === 'firework') {
+        // Smaller and far more colourful than a TNT blast.
+        const colors = [[1, 0.3, 0.3], [0.3, 0.7, 1], [1, 0.85, 0.2], [0.4, 1, 0.6], [0.9, 0.4, 1]];
+        for (let i = 0; i < 40; i++) {
+          const ang = Math.random() * Math.PI * 2, up = Math.random();
+          const spd = 2 + Math.random() * 6;
+          const c = colors[(Math.random() * colors.length) | 0];
+          this.particlesMeta.push({
+            x: d.x, y: d.y, z: d.z,
+            vx: Math.cos(ang) * spd, vy: up * spd, vz: Math.sin(ang) * spd,
+            r: c[0], g: c[1], b: c[2], a: 1, size: 0.14, life: 0.5 + Math.random() * 0.4, t: 0, gravity: true
+          });
+        }
+        const dist = Math.hypot(d.x - this.me.x, d.y - this.me.y, d.z - this.me.z);
+        this._lightningFlashT = Math.max(this._lightningFlashT || 0, clamp(0.2 - dist / 30, 0, 0.2));
+        global.MCSound.fireworkExplode();
+      } else if (d.kind === 'fireworkboost') {
+        for (let i = 0; i < 18; i++) this.particlesMeta.push({
+          x: d.x, y: d.y, z: d.z, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, vz: (Math.random() - 0.5) * 2,
+          r: 1, g: 0.8, b: 0.3, a: 1, size: 0.1, life: 0.35, t: 0
+        });
+        global.MCSound.fireworkLaunch();
+      } else if (d.kind === 'totem') {
+        for (let i = 0; i < 30; i++) this.particlesMeta.push({
+          x: d.x, y: d.y, z: d.z, vx: (Math.random() - 0.5) * 3, vy: Math.random() * 4, vz: (Math.random() - 0.5) * 3,
+          r: 1, g: 0.85, b: 0.25, a: 1, size: 0.13, life: 0.7 + Math.random() * 0.3, t: 0, gravity: true
+        });
+        global.MCSound.totem();
+      } else if (d.kind === 'crystal') {
+        // A big pink/white shatter burst, bigger and brighter than TNT.
+        const n = Math.min(90, 30 + (d.radius || 6) * 6);
+        for (let i = 0; i < n; i++) {
+          const ang = Math.random() * Math.PI * 2, up = Math.random();
+          const spd = 3 + Math.random() * ((d.radius || 6) * 1.3);
+          const pink = Math.random() < 0.5;
+          this.particlesMeta.push({
+            x: d.x, y: d.y, z: d.z,
+            vx: Math.cos(ang) * spd * (1 - up * 0.3), vy: up * spd * 1.2, vz: Math.sin(ang) * spd * (1 - up * 0.3),
+            r: pink ? 1 : 0.9, g: pink ? 0.6 : 0.9, b: pink ? 0.85 : 1, a: 1, size: 0.2, life: 0.5 + Math.random() * 0.4, t: 0, gravity: true
+          });
+        }
+        const dist = Math.hypot(d.x - this.me.x, d.y - this.me.y, d.z - this.me.z);
+        this._lightningFlashT = Math.max(this._lightningFlashT || 0, clamp(0.35 - dist / 40, 0, 0.35));
+        this._shakeT = Math.max(this._shakeT || 0, clamp(0.55 - dist / 25, 0, 0.55));
+        global.MCSound.crystal();
+      } else if (d.kind === 'anchor') {
+        // The biggest explosion in the game - reuse the TNT burst shape but
+        // scaled way up, with a deep purple tint (respawn anchor's colour).
+        const n = Math.min(110, 40 + (d.radius || 8) * 6);
+        for (let i = 0; i < n; i++) {
+          const ang = Math.random() * Math.PI * 2, up = Math.random();
+          const spd = 3 + Math.random() * ((d.radius || 8) * 1.4);
+          this.particlesMeta.push({
+            x: d.x, y: d.y, z: d.z,
+            vx: Math.cos(ang) * spd * (1 - up * 0.4), vy: up * spd, vz: Math.sin(ang) * spd * (1 - up * 0.4),
+            r: 0.55 + Math.random() * 0.3, g: 0.15, b: 0.65 + Math.random() * 0.3, a: 1, size: 0.24, life: 0.6 + Math.random() * 0.4, t: 0, gravity: true
+          });
+        }
+        for (let i = 0; i < 30; i++) this.particlesMeta.push({
+          x: d.x, y: d.y, z: d.z, vx: (Math.random() - 0.5) * 2.5, vy: 0.5 + Math.random() * 3.5, vz: (Math.random() - 0.5) * 2.5,
+          r: 0.35, g: 0.32, b: 0.3, a: 0.85, size: 0.32, life: 1.2 + Math.random() * 0.6, t: 0
+        });
+        const dist = Math.hypot(d.x - this.me.x, d.y - this.me.y, d.z - this.me.z);
+        this._lightningFlashT = Math.max(this._lightningFlashT || 0, clamp(0.5 - dist / 55, 0, 0.5));
+        this._shakeT = Math.max(this._shakeT || 0, clamp(0.7 - dist / 35, 0, 0.7));
+        global.MCSound.explosion();
+        global.MCSound.explosion();
+      } else if (d.kind === 'anchorcharge') {
+        for (let i = 0; i < 8; i++) this.particlesMeta.push({
+          x: d.x, y: d.y, z: d.z, vx: (Math.random() - 0.5) * 1.4, vy: Math.random() * 1.6, vz: (Math.random() - 0.5) * 1.4,
+          r: 1, g: 0.8, b: 0.3, a: 1, size: 0.09, life: 0.4, t: 0
+        });
+        global.MCSound.click();
       }
     }
 
@@ -1479,8 +1931,21 @@
       this.hud.hotbar.innerHTML = '';
       this.hotbarSlots.forEach((idx, pos) => {
         const cell = document.createElement('div');
-        cell.className = 'slot' + (idx !== null && idx === this.me.slot ? ' active' : '') + (idx === null ? ' empty' : '');
-        if (idx !== null) {
+        // 'chestplate' is a placeholder (not a real ITEMS index) left behind
+        // when the elytra gets equipped in its place - see the elytra-equip
+        // branch of _onRightDown() and _wireChestDrag(). Indexing ITEMS with
+        // it returns undefined and crashing here on item.type would abort
+        // this whole forEach loop, silently dropping every hotbar slot after
+        // it - same bugfix as _renderSlotZone's isChestplate check.
+        const isChestplate = idx === 'chestplate';
+        cell.className = 'slot' + (typeof idx === 'number' && idx === this.me.slot ? ' active' : '') + (idx === null ? ' empty' : '');
+        if (isChestplate) {
+          cell.appendChild(global.MCTextures.itemIcon('chestplate', 40));
+          const tag = document.createElement('div');
+          tag.className = 'count';
+          tag.textContent = 'IV';
+          cell.appendChild(tag);
+        } else if (idx !== null) {
           const item = ITEMS[idx];
           const icon = item.type === 'block' ? global.MCTextures.blockIcon(tiles, item.block, 40) : global.MCTextures.itemIcon(item.key, 40);
           cell.appendChild(icon);
@@ -1498,15 +1963,34 @@
       });
     }
 
+    /** Redraws the in-game HUD's offhand icon (next to the hotbar) from
+     * `this.offhand` - called at session start and again whenever the
+     * offhand item changes (see _renderOffhandSlot()). */
     _buildOffhandHUD() {
       const slot = el('offhandSlot');
+      const label = slot.querySelector('.slotlabel');
       slot.innerHTML = '';
-      slot.appendChild(global.MCTextures.itemIcon('shield', 40));
-      slot.title = MC.SHIELD.name + ' — hold RMB with sword/pick to block';
+      if (label) slot.appendChild(label);
+      if (this.offhand === 'shield') {
+        slot.appendChild(global.MCTextures.itemIcon('shield', 40));
+        slot.title = MC.SHIELD.name + ' — hold RMB with sword/pick to block';
+      } else {
+        const item = ITEMS.find(i => i.key === this.offhand);
+        const icon = item.type === 'block' && this.renderer ? global.MCTextures.blockIcon(this.renderer.tiles, item.block, 40) : global.MCTextures.itemIcon(item.key, 40);
+        slot.appendChild(icon);
+        if (item.ammo !== undefined) {
+          const count = document.createElement('div');
+          count.className = 'count';
+          count.textContent = this.ammo ? this.ammo[item.key] : item.ammo;
+          slot.appendChild(count);
+        }
+        slot.title = item.name + ' (equipped in offhand)';
+      }
     }
 
     _updateAmmoUI() {
       this._buildHotbar();
+      this._buildOffhandHUD();
       // Keep the inventory's hotbar mirror (ammo counts, active slot) in
       // sync too, in case ammo changes while the player is tabbed into it.
       if (this.inventoryOpen) this._buildInventoryUI();
@@ -1669,6 +2153,7 @@
         if (p.swingT !== undefined && p.swingT >= 0 && p.swingT < 0.001) p.swingT = 0.001;
         if (p.swingT > 0.4) p.swingT = -1;
       }
+      if (this._damageNumbers && this._damageNumbers.length) this._drawDamageNumbers();
 
       // projectiles
       for (const pr of this.projectiles.values()) {
@@ -1754,6 +2239,46 @@
       node.style.top = sy + 'px';
       const dist = Math.hypot(p.x - this.me.x, p.y - this.me.y, p.z - this.me.z);
       node.style.opacity = dist > 55 ? '0' : '1';
+    }
+
+    /** Spawns one floating damage number at a world position (the "Show
+     * damage numbers" menu option) - bright, outlined text that drifts up
+     * and fades out over ~1s, then removes itself. Projected to screen
+     * space every frame in _drawDamageNumbers(), same technique as
+     * _drawNameTag(). */
+    _spawnDamageNumber(x, y, z, amount) {
+      const node = document.createElement('div');
+      node.className = 'dmgnum';
+      node.textContent = (Math.round(amount * 10) / 10).toString();
+      document.getElementById('tags').appendChild(node);
+      this._damageNumbers.push({
+        x: x + (Math.random() - 0.5) * 0.4, y: y + 1.6, z: z + (Math.random() - 0.5) * 0.4,
+        node, born: performance.now()
+      });
+    }
+
+    _drawDamageNumbers() {
+      const life = 1000; // ms
+      const vp = this.renderer.viewProj;
+      const now = performance.now();
+      for (let i = this._damageNumbers.length - 1; i >= 0; i--) {
+        const d = this._damageNumbers[i];
+        const age = now - d.born;
+        if (age >= life) { d.node.remove(); this._damageNumbers.splice(i, 1); continue; }
+        const frac = age / life;
+        const wy = d.y + frac * 1.1; // drifts upward as it ages
+        const cx4 = vp[0] * d.x + vp[4] * wy + vp[8] * d.z + vp[12];
+        const cy4 = vp[1] * d.x + vp[5] * wy + vp[9] * d.z + vp[13];
+        const cw4 = vp[3] * d.x + vp[7] * wy + vp[11] * d.z + vp[15];
+        if (cw4 <= 0.05) { d.node.style.display = 'none'; continue; }
+        const ndcX = cx4 / cw4, ndcY = cy4 / cw4;
+        const sx = (ndcX * 0.5 + 0.5) * window.innerWidth;
+        const sy = (1 - (ndcY * 0.5 + 0.5)) * window.innerHeight;
+        d.node.style.display = 'block';
+        d.node.style.left = sx + 'px';
+        d.node.style.top = sy + 'px';
+        d.node.style.opacity = String(Math.max(0, 1 - frac));
+      }
     }
 
     _drawViewmodel() {
@@ -1872,6 +2397,8 @@
     if (item.type === 'windcharge') return 'Wind Charges: ' + ammo.windcharge;
     if (item.type === 'potion') return item.name + ': ' + ammo[item.key];
     if (item.type === 'block' && item.ammo !== undefined) return item.name + ': ' + ammo[item.key];
+    if (item.type === 'totem') return 'Totems: ' + ammo.totem;
+    if (item.type === 'firework') return 'Fireworks: ' + ammo.firework;
     return '';
   }
 

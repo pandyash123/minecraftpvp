@@ -44,9 +44,13 @@
     TNT: 22,
     TNT_MINECART: 23,
     RAIL: 24,
-    CRACKS: 25 // 25..34 = break stages 0..9
+    POWDER_SNOW: 25,
+    END_CRYSTAL: 26,
+    RESPAWN_ANCHOR: 27,
+    GLOWSTONE: 28,
+    CRACKS: 29 // 29..38 = break stages 0..9
   };
-  T.TILE_COUNT = 35;
+  T.TILE_COUNT = 39;
 
   var ID = {
     AIR: 0,
@@ -72,7 +76,11 @@
     LAVA: 20,
     TNT: 21,
     TNT_MINECART: 22,
-    RAIL: 23
+    RAIL: 23,
+    POWDER_SNOW: 24,
+    END_CRYSTAL: 25,
+    RESPAWN_ANCHOR: 26,
+    GLOWSTONE: 27
   };
 
   // solid   -> blocks player movement
@@ -112,8 +120,27 @@
     { name: 'TNT Minecart', all: T.TNT_MINECART, hardness: 0 },
     // A TNT Minecart can only be placed directly on top of a rail (see
     // server.js's 'setBlock' handler) - a plain, unlimited utility block
-    // otherwise, same tier as cobble/planks.
-    { name: 'Rail', all: T.RAIL, hardness: 0.5 }
+    // otherwise, same tier as cobble/planks. Renders as a thin flat slab
+    // (see mesher.js's RAIL_HEIGHT), not a full cube - still solid/full
+    // collision though, so it's still walkable like normal ground.
+    { name: 'Rail', all: T.RAIL, hardness: 0.5, opaque: false },
+    // Walk/fall-through like a cobweb (no collision), but the opposite
+    // effect - see server.js's fall-damage and burn checks: standing/landing
+    // in it cancels fall damage and extinguishes fire instead of hurting you.
+    { name: 'Powder Snow', all: T.POWDER_SNOW, hardness: 0.3, solid: false, opaque: false, powderSnow: true },
+    // Can only be placed on top of obsidian (see server.js's 'setBlock'
+    // handler) - non-solid (you can walk through/under it, matching
+    // vanilla's floating crystal) and never occludes light. Hit it (melee
+    // or a projectile) to detonate - see server.js's 'hitCrystal' handler
+    // and detonateEndCrystal().
+    { name: 'End Crystal', all: T.END_CRYSTAL, hardness: 0, solid: false, opaque: false },
+    // Charge with glowstone (right-click it while holding glowstone) up to
+    // 4 times - the 4th charge detonates it immediately, a bigger blast
+    // than an end crystal. See server.js's 'chargeAnchor' handler.
+    { name: 'Respawn Anchor', all: T.RESPAWN_ANCHOR, hardness: 3, pick: true },
+    // A plain light-emitting decorative block - also what charges a
+    // respawn anchor (right-click one instead of placing normally).
+    { name: 'Glowstone', all: T.GLOWSTONE, hardness: 0.3 }
   ];
 
   var N = BLOCKS.length;
@@ -121,6 +148,7 @@
   var OPAQUE = new Uint8Array(N);
   var LIQUID = new Uint8Array(N);
   var WEB = new Uint8Array(N);
+  var POWDER_SNOW = new Uint8Array(N);
   var HARDNESS = new Float32Array(N);
   var PICKABLE = new Uint8Array(N);
   // per-face tile: order +X, -X, +Y, -Y, +Z, -Z
@@ -133,6 +161,7 @@
     OPAQUE[i] = b.opaque === false ? 0 : 1;
     LIQUID[i] = b.liquid ? 1 : 0;
     WEB[i] = b.web ? 1 : 0;
+    POWDER_SNOW[i] = b.powderSnow ? 1 : 0;
     HARDNESS[i] = b.hardness === undefined ? 1 : b.hardness;
     PICKABLE[i] = b.pick ? 1 : 0;
     var top = b.top !== undefined ? b.top : b.all;
@@ -160,7 +189,11 @@
     { key: 'bow', name: 'Bow', type: 'bow', maxDamage: 10, minDamage: 2, drawTime: 1.0, mineSpeed: 0.3 },
     // ammo here doubles as the max stack size - also what you spawn with.
     { key: 'pearl', name: 'Ender Pearl', type: 'pearl', ammo: 16, cooldown: 0.9, mineSpeed: 0.3 },
-    { key: 'gapple', name: 'Golden Apple', type: 'food', heal: 6, absorb: 4, eatTime: 1.3, ammo: 64, mineSpeed: 0.3 },
+    // Absorption is instant on eating; the 4 hearts of real healing trickle
+    // in afterward via Regeneration I (8 HP over 8s = 1 HP/s), not a flat
+    // instant heal.
+    { key: 'gapple', name: 'Golden Apple', type: 'food', heal: 0, absorb: 4, eatTime: 1.3, ammo: 64, mineSpeed: 0.3,
+      regenLevel: 1, regenSeconds: 8 },
     { key: 'pick', name: 'Iron Pickaxe', type: 'tool', damage: 3, cooldown: 0.5, knockback: 0.6, mineSpeed: 6, pick: true },
     { key: 'cobble', name: 'Cobblestone', type: 'block', block: ID.COBBLE, mineSpeed: 0.3 },
     { key: 'planks', name: 'Oak Planks', type: 'block', block: ID.PLANKS, mineSpeed: 0.3 },
@@ -218,12 +251,13 @@
     // Knockback II/V are toggles (see ENCHANT_DEFS.stick) - V wins if both
     // are somehow checked at once.
     { key: 'stick', name: 'Stick', type: 'weapon', damage: 1, cooldown: 0.4, knockback: 0.3, mineSpeed: 0.2 },
-    // Notch apple: Absorption IV (a full extra row of hearts), Regeneration
-    // II for 30s, Fire Resistance I and Resistance I for 5 minutes - see
-    // COMBAT.EGAP_* below. Held-eat like a golden apple, just rarer and far
-    // stronger.
-    { key: 'egap', name: 'Enchanted Golden Apple', type: 'food', heal: 4, absorb: 20, absorbCap: 20, eatTime: 1.6, ammo: 2, mineSpeed: 0.3,
-      regenLevel: 2, regenSeconds: 30, fireResLevel: 1, resistLevel: 1, buffSeconds: 300 },
+    // Notch apple: Absorption IV (a full extra row of hearts) is instant,
+    // same as a golden apple, plus Fire Resistance I and Resistance I for 5
+    // minutes. The actual healing is the same 4-hearts-over-8s trickle as a
+    // plain golden apple, not an instant heal - egap's edge here is the
+    // absorption/resistance/fire-res, not faster healing.
+    { key: 'egap', name: 'Enchanted Golden Apple', type: 'food', heal: 0, absorb: 20, absorbCap: 20, eatTime: 1.6, ammo: 2, mineSpeed: 0.3,
+      regenLevel: 1, regenSeconds: 8, fireResLevel: 1, resistLevel: 1, buffSeconds: 300 },
     // Right-click places a water source block, same flow as any other
     // placeable block (cobble/planks/etc) - a one-way, ammo-limited
     // consumable (no bucket to fill back up), restocked on kills instead.
@@ -243,7 +277,44 @@
     // Right-click a placed TNT/TNT Minecart within reach to light its fuse -
     // right-click any other block to set the ground on fire instead (see
     // COMBAT.GROUND_FIRE_* below). Unlimited uses, like the other basic tools.
-    { key: 'flint_steel', name: 'Flint and Steel', type: 'igniter', mineSpeed: 0.3 }
+    { key: 'flint_steel', name: 'Flint and Steel', type: 'igniter', mineSpeed: 0.3 },
+    // Non-solid like a cobweb (you fall/walk straight through it), but the
+    // opposite effect - cancels fall damage on landing in it and puts out
+    // fire, see server.js's fall-damage and burn checks.
+    { key: 'powder_snow_bucket', name: 'Powder Snow Bucket', type: 'block', block: ID.POWDER_SNOW, ammo: 2, mineSpeed: 0.3 },
+    // Passive - not something you right-click. Only actually saves you
+    // while equipped in the offhand slot (drag it there in the inventory
+    // screen) - a hit that would kill you is consumed instead: you're left
+    // at 1 HP with a burst of
+    // Regeneration/Resistance/Fire Resistance, same as vanilla. Doesn't
+    // save you from the void. See applyDamage()'s death check. Starts with
+    // 3 in reserve; only one can ever be equipped (armed) at a time.
+    { key: 'totem', name: 'Totem of Undying', type: 'totem', ammo: 3, mineSpeed: 0.3 },
+    // Right-click it (or drag it onto the chest armor slot in the
+    // inventory) to wear it in place of the chestplate - gives up the
+    // chestplate's defense/toughness, same as vanilla (see applyDamage()).
+    // Once worn, jump while falling to start gliding, regardless of what's
+    // currently held - see COMBAT.ELYTRA_* below and the glide branch in
+    // shared/physics.js. No ammo; it never runs out.
+    { key: 'elytra', name: 'Elytra', type: 'elytra', mineSpeed: 0.3 },
+    // Held and right-clicked while gliding, it's a forward speed boost -
+    // that's the only thing the item itself does. Firing one as an
+    // explosive weapon requires a crossbow: Shift+right-click with the
+    // crossbow out loads/fires a firework instead of an arrow, spending
+    // firework ammo instead of arrow ammo. See COMBAT.FIREWORK_* below.
+    { key: 'firework', name: 'Firework Rocket', type: 'firework', ammo: 16, cooldown: 0.5, mineSpeed: 0.3 },
+    // Can only be placed on top of obsidian. Hit it with anything (melee or
+    // a projectile) to detonate it - huge damage to anyone at or above its
+    // own height, only a couple hearts to anyone below it (real height
+    // matters, not just distance) - see COMBAT.CRYSTAL_* below.
+    { key: 'end_crystal', name: 'End Crystal', type: 'block', block: ID.END_CRYSTAL, mineSpeed: 0.3 },
+    // Charge with glowstone (right-click it while holding glowstone) up to
+    // 4 times - reaching 4 detonates it immediately, a bigger blast than an
+    // end crystal. See COMBAT.ANCHOR_* below.
+    { key: 'respawn_anchor', name: 'Respawn Anchor', type: 'block', block: ID.RESPAWN_ANCHOR, mineSpeed: 0.3 },
+    // Right-click a respawn anchor within reach to charge it instead of
+    // placing normally - otherwise just a plain light-emitting block.
+    { key: 'glowstone', name: 'Glowstone', type: 'block', block: ID.GLOWSTONE, mineSpeed: 0.3 }
   ];
   for (var k = 0; k < ITEMS.length; k++) ITEMS[k].slot = k;
 
@@ -260,7 +331,9 @@
       items: ['sword', 'bow', 'pearl', 'gapple', 'pick', 'cobble', 'planks', 'cobweb', 'axe', 'mace', 'spear', 'windcharge',
         'obsidian', 'pot_strength', 'pot_speed', 'pot_fireres', 'pot_turtle', 'pot_health',
         'crossbow', 'trident', 'stick', 'egap',
-        'water_bucket', 'lava_bucket', 'tnt', 'tnt_minecart', 'rail', 'flint_steel']
+        'water_bucket', 'lava_bucket', 'tnt', 'tnt_minecart', 'rail', 'flint_steel',
+        'powder_snow_bucket', 'totem', 'firework',
+        'end_crystal', 'respawn_anchor', 'glowstone']
     }
   };
 
@@ -313,6 +386,9 @@
     ],
     pick: [
       { key: 'efficiency', name: 'Efficiency V', def: true }
+    ],
+    mace: [
+      { key: 'breach', name: 'Breach (bypasses armor)', def: false }
     ]
   };
 
@@ -514,15 +590,9 @@
     LIGHTNING_BONUS_DMG: 8,
     RANDOM_LIGHTNING_CHANCE_PER_TICK: 0.0015,
 
-    // Looting III restocks 2-3 enchanted golden apples per kill (inclusive,
-    // randomly rolled) - smaller than the flat ammo/potion restock above,
-    // matching how rare egaps are meant to be in the first place.
-    EGAP_LOOT_MIN: 2,
-    EGAP_LOOT_MAX: 3,
-
     // Lava: hurts (and ignites, so it keeps burning after stepping out)
     // anyone standing in it, checked once a second same cadence as fire.
-    LAVA_DPS: 4,
+    LAVA_DPS: 8,
     // TNT / TNT Minecart: flint and steel starts the fuse, then after it
     // burns down the block clears itself, breaks blocks in a radius (never
     // bedrock) and blasts/damages nearby players - same shape as the wind
@@ -532,9 +602,9 @@
     TNT_BLAST_RADIUS: 5,
     TNT_BLAST_DMG: 22,
     TNT_BLAST_KB: 2.2,
-    TNT_MINECART_FUSE_SECONDS: 3,
-    TNT_MINECART_BLAST_RADIUS: 7.5,
-    TNT_MINECART_BLAST_DMG: 30,
+    TNT_MINECART_FUSE_SECONDS: 0,
+    TNT_MINECART_BLAST_RADIUS: 6,
+    TNT_MINECART_BLAST_DMG: 80,
     TNT_MINECART_BLAST_KB: 2.8,
     IGNITE_REACH: 5,
 
@@ -553,7 +623,63 @@
     WATER_SPREAD_MAX_HOPS: 4,
     LAVA_SPREAD_MAX_HOPS: 2,
     LIQUID_SPREAD_INTERVAL: 0.4,
-    LIQUID_SPREAD_PER_TICK: 3
+    LIQUID_SPREAD_PER_TICK: 3,
+
+    // Totem of Undying: what a save leaves you with - a sliver of health and
+    // a few seconds of buffs to actually get you out of danger, same shape
+    // as vanilla's totem pop.
+    TOTEM_HEALTH: 1,
+    TOTEM_REGEN_LEVEL: 2,
+    TOTEM_REGEN_SECONDS: 4,
+    TOTEM_RESIST_LEVEL: 4,
+    TOTEM_RESIST_SECONDS: 4,
+    TOTEM_FIRE_RES_SECONDS: 4,
+
+    // Looting III's kill restock for totem/egap: 1 guaranteed, with a chance
+    // to bump that up to 2-3 instead - same rule for both, unlike the flat
+    // half-stack restock every other item gets.
+    LOOT_BONUS_CHANCE: 0.5,
+    LOOT_BONUS_MIN: 2,
+    LOOT_BONUS_MAX: 3,
+
+    // Elytra: hold jump while falling (not on the ground) to start gliding -
+    // pitch steers it, same trade-off as vanilla (diving trades altitude for
+    // speed, climbing trades speed for altitude). DRAG slowly bleeds off
+    // whatever speed a firework boost isn't actively refilling.
+    ELYTRA_MIN_FALL_SPEED: 1.5, // vy must already be falling at least this fast to start gliding
+    ELYTRA_GLIDE_GRAVITY: 4,
+    ELYTRA_MAX_SPEED: 28,
+    ELYTRA_DRAG: 0.995,
+    ELYTRA_PITCH_ACCEL: 26,
+
+    // Firework Rocket: a forward speed burst while gliding, or a thrown
+    // explosive otherwise - smaller/faster than TNT, more like a beefed-up
+    // wind charge blast with a flashy multi-colour burst.
+    FIREWORK_BOOST_SPEED: 18,
+    FIREWORK_SPEED: 26,
+    FIREWORK_GRAVITY: 4,
+    FIREWORK_BLAST_RADIUS: 3.5,
+    FIREWORK_BLAST_DMG: 16,
+    FIREWORK_BLAST_KB: 1.6,
+    FIREWORK_KILL_RESTOCK: 16,
+
+    // End Crystal: classic "crystal PvP" - devastating if the target is at
+    // or above the crystal's own height, barely a scratch if they're below
+    // it (real vanilla's exposure-based falloff, simplified to a flat
+    // height check rather than true line-of-sight raycasting).
+    CRYSTAL_BLAST_RADIUS: 6,
+    CRYSTAL_BLAST_DMG_MAX: 46,
+    CRYSTAL_BLAST_DMG_BELOW: 2,
+    CRYSTAL_BLAST_KB: 2.4,
+    CRYSTAL_HIT_REACH: 5,
+
+    // Respawn Anchor: charges 1 at a time with glowstone, reaching 4
+    // detonates it on the spot - bigger than TNT or an end crystal, same
+    // "obviously the strongest bomb" role it has in vanilla.
+    ANCHOR_MAX_CHARGES: 4,
+    ANCHOR_BLAST_RADIUS: 8,
+    ANCHOR_BLAST_DMG: 60,
+    ANCHOR_BLAST_KB: 3.2
   };
 
   var PHYS = {
@@ -610,6 +736,7 @@
     OPAQUE: OPAQUE,
     LIQUID: LIQUID,
     WEB: WEB,
+    POWDER_SNOW: POWDER_SNOW,
     HARDNESS: HARDNESS,
     TILES: TILES,
     ITEMS: ITEMS,

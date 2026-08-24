@@ -39,6 +39,7 @@
   ];
 
   const WATER_DROP = 0.11; // water surface sits slightly below a full block
+  const RAIL_HEIGHT = 0.125; // rails render as a thin flat slab, not a full cube
 
   function Builder() {
     this.v = [];
@@ -87,10 +88,12 @@
           const id = world.blocks[(y * W.SZ + z) * W.SX + x];
           if (id === ID.AIR) continue;
           const isWater = MC.LIQUID[id] === 1;
+          const isRail = id === ID.RAIL;
           const build = isWater ? water : opaque;
           const waterTopExposed = isWater && !MC.LIQUID[get(x, y + 1, z)];
 
           for (let f = 0; f < 6; f++) {
+            if (isRail && f === 3) continue; // -Y: never visible under a thin slab sitting on solid ground
             const face = FACES[f];
             const nxp = x + face.dir[0], nyp = y + face.dir[1], nzp = z + face.dir[2];
             const nb = get(nxp, nyp, nzp);
@@ -122,6 +125,7 @@
 
               let vy = y + c[1];
               if (isWater && waterTopExposed && c[1] === 1) vy -= WATER_DROP;
+              if (isRail && c[1] === 1) vy = y + RAIL_HEIGHT;
 
               const light = face.shade * lit * (0.55 + 0.45 * (a / 3));
               verts.push([x + c[0], vy, z + c[2], c[3], c[4], layer, light]);

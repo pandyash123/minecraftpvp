@@ -156,7 +156,10 @@
     // happens at is itself frame-time-dependent (worse on a low framerate).
     // Skipping the blend entirely while dashing sidesteps both problems -
     // the caller (game.js) still owns how long that window lasts.
-    if (!input.dashing) {
+    // Elytra: purely look-steered (same as vanilla), so skip the WASD blend
+    // above entirely while gliding - fighting the glide vector with strafe
+    // input would just fight the whole point of it.
+    if (!input.dashing && !input.glide) {
       e.vx += (wishX * speed - e.vx) * Math.min(1, accel * dt);
       e.vz += (wishZ * speed - e.vz) * Math.min(1, accel * dt);
     }
@@ -171,6 +174,27 @@
       e.vy -= PHYS.GRAVITY * 0.28 * dt;
       e.vy *= Math.max(0, 1 - PHYS.WATER_DRAG * dt * 0.35);
       if (input.jump) e.vy = PHYS.SWIM_UP;
+    } else if (input.glide) {
+      // Elytra flight: look direction pulls velocity toward itself (diving
+      // trades altitude for speed, climbing trades speed for altitude),
+      // softened gravity, drag bleeds off whatever a firework boost isn't
+      // actively refilling, and a speed cap keeps it from running away.
+      var EL = MC.COMBAT;
+      var pitch = input.pitch || 0;
+      var cp = Math.cos(pitch), sp = Math.sin(pitch);
+      // Same look-direction convention as game.js's _lookDir() (positive
+      // pitch/sin looks up) - this was inverted before, so looking up dove
+      // instead of climbing.
+      var dirX = -Math.sin(input.yaw) * cp, dirY = sp, dirZ = -Math.cos(input.yaw) * cp;
+      e.vy -= EL.ELYTRA_GLIDE_GRAVITY * dt;
+      var pull = EL.ELYTRA_PITCH_ACCEL * dt;
+      e.vx += dirX * pull; e.vy += dirY * pull; e.vz += dirZ * pull;
+      e.vx *= EL.ELYTRA_DRAG; e.vy *= EL.ELYTRA_DRAG; e.vz *= EL.ELYTRA_DRAG;
+      var spd = Math.hypot(e.vx, e.vy, e.vz);
+      if (spd > EL.ELYTRA_MAX_SPEED) {
+        var s = EL.ELYTRA_MAX_SPEED / spd;
+        e.vx *= s; e.vy *= s; e.vz *= s;
+      }
     } else {
       e.vy -= PHYS.GRAVITY * dt;
       if (input.jump && e.onGround) e.vy = PHYS.JUMP;

@@ -90,6 +90,23 @@
       this.thump(70, 0.7, 0.5, 'sawtooth');
       this.noise(0.9, 0.45, 260, 'lowpass');
     }
+    totem() {
+      this.thump(500, 0.3, 0.3, 'sine');
+      this.thump(750, 0.35, 0.25, 'sine');
+      this.noise(0.4, 0.25, 3000, 'bandpass');
+    }
+    fireworkLaunch() { this.noise(0.15, 0.25, 4000, 'highpass'); this.thump(260, 0.25, 0.2, 'sawtooth'); }
+    fireworkExplode() {
+      this.noise(0.06, 0.4, 3800, 'highpass');
+      this.thump(180, 0.35, 0.3, 'square');
+      this.noise(0.3, 0.2, 1400, 'bandpass');
+    }
+    crystal() {
+      this.noise(0.1, 0.5, 4500, 'highpass');
+      this.thump(120, 0.6, 0.4, 'sawtooth');
+      this.thump(900, 0.3, 0.2, 'sine');
+      this.noise(0.6, 0.3, 2000, 'bandpass');
+    }
   }
 
   global.MCSound = new Sound();

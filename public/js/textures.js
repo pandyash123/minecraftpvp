@@ -319,6 +319,26 @@
       }
     }
 
+    // Powder snow: near-white with a faint blue-grey speckle, soft (no bevel).
+    fill(tiles[T.POWDER_SNOW], '#eef3f7', 6, 263);
+    blobs(tiles[T.POWDER_SNOW], '#d8e4ec', 10, 1, 269);
+
+    // End Crystal: glassy pink/white core - soft (no bevel), matches its
+    // glowing, non-opaque look in-world.
+    fill(tiles[T.END_CRYSTAL], '#f3d9f7', 4, 401);
+    blobs(tiles[T.END_CRYSTAL], '#ffffff', 18, 2, 409);
+    blobs(tiles[T.END_CRYSTAL], '#c88cd8', 8, 1, 419);
+
+    // Respawn Anchor: dark purple stone with a glowing crystalline top.
+    fill(tiles[T.RESPAWN_ANCHOR], '#2a1830', 10, 431);
+    blobs(tiles[T.RESPAWN_ANCHOR], '#3d2246', 14, 1, 439);
+    blobs(tiles[T.RESPAWN_ANCHOR], '#9a4ad8', 6, 1, 449);
+
+    // Glowstone: warm yellow, blotchy like real vanilla glowstone.
+    fill(tiles[T.GLOWSTONE], '#e8c25a', 10, 461);
+    blobs(tiles[T.GLOWSTONE], '#fff0a0', 12, 2, 469);
+    blobs(tiles[T.GLOWSTONE], '#c9963a', 8, 1, 479);
+
     // break overlay stages 0..9 (transparent + growing dark cracks)
     for (let s = 0; s < 10; s++) {
       const t = tiles[T.CRACKS + s];
@@ -342,7 +362,8 @@
     // their own border treatment (IRON, GOLD), transparency holes (LEAVES),
     // shader-blended tiles (WATER, GLASS), and the break-overlay layers.
     [T.GRASS_TOP, T.GRASS_SIDE, T.DIRT, T.STONE, T.COBBLE, T.LOG_SIDE, T.LOG_TOP,
-      T.SAND, T.PLANKS, T.BEDROCK, T.OBSIDIAN, T.GRAVEL, T.BRICK, T.IRON_ORE, T.GOLD_ORE, T.TNT, T.TNT_MINECART, T.RAIL]
+      T.SAND, T.PLANKS, T.BEDROCK, T.OBSIDIAN, T.GRAVEL, T.BRICK, T.IRON_ORE, T.GOLD_ORE, T.TNT, T.TNT_MINECART, T.RAIL,
+      T.RESPAWN_ANCHOR, T.GLOWSTONE]
       .forEach(idx => applyBevel(tiles[idx]));
 
     return tiles;
@@ -965,6 +986,67 @@
       g.fillStyle = '#ffe27a';
       const sparks = [[0.5, 0.42], [0.58, 0.36], [0.46, 0.34], [0.56, 0.46]];
       for (const [sx, sy] of sparks) g.fillRect(S * sx, S * sy, Math.max(1, u * 0.8), Math.max(1, u * 0.8));
+    } else if (key === 'totem') {
+      // Squat golden idol silhouette with a wide "arms out" head, vanilla's
+      // totem-of-undying read at a glance.
+      const grd = g.createLinearGradient(0, S * 0.1, 0, S * 0.95);
+      grd.addColorStop(0, '#ffe27a'); grd.addColorStop(1, '#a8720f');
+      g.fillStyle = grd;
+      g.beginPath();
+      g.moveTo(S * 0.5, S * 0.08);
+      g.lineTo(S * 0.7, S * 0.28); g.lineTo(S * 0.62, S * 0.28); g.lineTo(S * 0.62, S * 0.5);
+      g.lineTo(S * 0.78, S * 0.62); g.lineTo(S * 0.68, S * 0.68); g.lineTo(S * 0.58, S * 0.58);
+      g.lineTo(S * 0.58, S * 0.92); g.lineTo(S * 0.42, S * 0.92); g.lineTo(S * 0.42, S * 0.58);
+      g.lineTo(S * 0.32, S * 0.68); g.lineTo(S * 0.22, S * 0.62); g.lineTo(S * 0.38, S * 0.5);
+      g.lineTo(S * 0.38, S * 0.28); g.lineTo(S * 0.3, S * 0.28);
+      g.closePath(); g.fill();
+      g.fillStyle = '#5a3a0a';
+      g.fillRect(S * 0.44, S * 0.34, S * 0.12, S * 0.1);
+      g.fillStyle = '#7de3e0';
+      g.fillRect(S * 0.46, S * 0.36, S * 0.03, S * 0.03);
+      g.fillRect(S * 0.51, S * 0.36, S * 0.03, S * 0.03);
+    } else if (key === 'elytra') {
+      // A pair of angular wings, mirrored either side of a small spine.
+      const wing = (sign) => {
+        g.save();
+        g.translate(S * 0.5, S * 0.5);
+        g.scale(sign, 1);
+        const grd = g.createLinearGradient(0, -S * 0.4, S * 0.42, S * 0.3);
+        grd.addColorStop(0, '#4a3a52'); grd.addColorStop(1, '#7a5a8a');
+        g.fillStyle = grd;
+        g.beginPath();
+        g.moveTo(0, -S * 0.32);
+        g.lineTo(S * 0.42, -S * 0.12);
+        g.lineTo(S * 0.36, S * 0.3);
+        g.lineTo(S * 0.06, S * 0.36);
+        g.closePath();
+        g.fill();
+        g.strokeStyle = '#2c2236';
+        g.lineWidth = Math.max(1, u * 0.4);
+        g.stroke();
+        g.restore();
+      };
+      wing(-1); wing(1);
+      g.fillStyle = '#3a2c44';
+      g.fillRect(S * 0.47, S * 0.16, S * 0.06, S * 0.24);
+    } else if (key === 'firework') {
+      // A striped paper tube with a fuse and a small colourful star burst
+      // above it, hinting at what it does when it goes off.
+      g.fillStyle = '#c23a2a';
+      g.fillRect(S * 0.42, S * 0.42, S * 0.16, S * 0.44);
+      g.fillStyle = '#e8e0c8';
+      for (let i = 0; i < 4; i++) g.fillRect(S * 0.42, S * (0.46 + i * 0.09), S * 0.16, S * 0.03);
+      g.strokeStyle = '#8a6a3a';
+      g.lineWidth = Math.max(1, u * 0.5);
+      g.beginPath(); g.moveTo(S * 0.5, S * 0.42); g.lineTo(S * 0.46, S * 0.3); g.stroke();
+      const colors = ['#ff5a5a', '#5ad0ff', '#ffe066', '#7dffb0'];
+      for (let i = 0; i < colors.length; i++) {
+        const ang = (i / colors.length) * Math.PI * 2 - Math.PI / 2;
+        g.fillStyle = colors[i];
+        g.beginPath();
+        g.arc(S * 0.5 + Math.cos(ang) * S * 0.16, S * 0.2 + Math.sin(ang) * S * 0.16, S * 0.045, 0, 6.29);
+        g.fill();
+      }
     }
     return cv;
   }
