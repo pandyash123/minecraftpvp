@@ -14,7 +14,7 @@
     on(evt, fn) { (this.handlers[evt] = this.handlers[evt] || []).push(fn); return this; }
     emit2(evt, data) { (this.handlers[evt] || []).forEach(fn => fn(data)); }
 
-    connect(name, kit, customItems, enchantOpts) {
+    connect(name, kit, customItems, enchantOpts, armor, swordTier, axeTier) {
       return new Promise((resolve, reject) => {
         const socket = io({ transports: ['websocket', 'polling'] });
         this.socket = socket;
@@ -22,7 +22,7 @@
 
         socket.on('connect', () => {
           this.connected = true;
-          socket.emit('join', { name, kit, customItems, enchantOpts }, () => {
+          socket.emit('join', { name, kit, customItems, enchantOpts, armor, swordTier, axeTier }, () => {
             clearTimeout(timeout);
           });
         });
@@ -33,7 +33,7 @@
         const events = ['playerJoin', 'playerLeave', 'spawned', 'respawn', 'teleport', 'hurt', 'heal',
           'killreward', 'hp', 'death', 'block', 'snapshot', 'projectile', 'projectileGone', 'swing',
           'hitmarker', 'arrowHit', 'effect', 'scores', 'chat', 'ammo', 'shieldStun', 'launch',
-          'effects', 'weather'];
+          'effects', 'weather', 'elytraUnlocked'];
         for (const e of events) socket.on(e, data => this.emit2(e, data));
 
         socket.on('disconnect', reason => this.emit2('disconnected', reason));
@@ -76,6 +76,7 @@
     ignite(x, y, z) { if (this.socket) this.socket.emit('ignite', { x, y, z }); }
     hitCrystal(x, y, z) { if (this.socket) this.socket.emit('hitCrystal', { x, y, z }); }
     chargeAnchor(x, y, z) { if (this.socket) this.socket.emit('chargeAnchor', { x, y, z }); }
+    hitAnchor(x, y, z) { if (this.socket) this.socket.emit('hitAnchor', { x, y, z }); }
     chat(text) { if (this.socket) this.socket.emit('chat', text); }
   }
 

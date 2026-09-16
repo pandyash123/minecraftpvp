@@ -60,6 +60,8 @@ const BOT_SHIELD_BREAK_HITS = { easy: 3, normal: 2, hard: 1, random: 2 };
 // higher-difficulty bots genuinely reach for it more often, not just less
 // randomly. egap is deliberately rarer than the other three.
 const BOT_BONUS_ITEM_CHANCE = 0.3;
+// elytra_firework temporarily removed - elytra flight is being tuned down
+// and isn't ready for bots to use yet.
 const BOT_BONUS_ITEM_WEIGHTS = { gapple: 3, cobweb: 3, egap: 1 };
 function rollBonusItem() {
   if (Math.random() >= BOT_BONUS_ITEM_CHANCE) return null;
@@ -76,6 +78,20 @@ function rollBonusItem() {
 // bots only ever consider the human player(s) a valid target, never each
 // other, so the whole squad fights you instead of each other.
 let botsCooperate = false;
+
+// Global "give bots hacks" toggle (see /bothacks, or the menu checkbox) -
+// when on, every bot fights dirty: instant webs regardless of distance,
+// extended melee reach, a damage multiplier, a lower attack cooldown, and a
+// gentle hover/float instead of falling normally. Off by default - this is
+// an opt-in novelty/challenge mode, not the baseline experience.
+let botHacksEnabled = false;
+const BOT_HACKS = {
+  reachBonus: 3,
+  dmgMult: 1.6,
+  cooldownDivisor: 1.8,
+  hoverFallCap: -1.5,
+  hoverHopVy: 4.5
+};
 
 // How much of their kit bots actually use in a fight, chosen at the menu or
 // via /botweapon / the 5th /bots argument:
@@ -247,7 +263,22 @@ function isInPowderSnow(p) {
  * list if they built one (see customItems, set at join), otherwise their
  * chosen kit preset (see MC.KITS) - bots always use the latter. */
 function playerHasItem(p, key) {
-  if (key === 'elytra') return false; // disabled on this deployment only - see coding memory / PUSH_NOTES
+  // Netherite sword/axe are a tier swap on top of sword/axe (see
+  // swordTier/axeTier, set at join and mirrored by the client's own hotbar
+  // build - see _initInventorySlots), never both at once: whichever one a
+  // kit/custom loadout would normally grant, the player's tier preference
+  // decides which single variant they actually have.
+  if (key === 'sword') return p.swordTier !== 'netherite' && hasBaseItem(p, 'sword');
+  if (key === 'netherite_sword') return p.swordTier === 'netherite' && hasBaseItem(p, 'sword');
+  if (key === 'axe') return p.axeTier !== 'netherite' && hasBaseItem(p, 'axe');
+  if (key === 'netherite_axe') return p.axeTier === 'netherite' && hasBaseItem(p, 'axe');
+  // Elytra is locked behind the secret '/elytra257' chat command (not in
+  // /help, not in any kit/custom loadout) - entirely separate from kit
+  // membership, unlike every other item.
+  if (key === 'elytra') return !!p.elytraUnlocked;
+  return hasBaseItem(p, key);
+}
+function hasBaseItem(p, key) {
   return p.customItems ? p.customItems.has(key) : MC.kitHasItem(p.kit, key);
 }
 
@@ -282,7 +313,17 @@ function itemForPlayer(p, slot) {
   return playerHasItem(p, item.key) ? item : null;
 }
 
-function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts) {
+/** Netherite sword/axe are their own selectable items (so they can carry
+ * their own higher base damage - see ITEMS), but mechanically they're just
+ * a sword/axe: same enchant slot, same armor-reduction/shield-break/
+ * looting/attack-dummy-retaliation handling as the plain version. Used
+ * everywhere those need "which weapon type is this, really" instead of the
+ * raw item key. */
+function baseWeaponKey(key) {
+  return key === 'netherite_sword' ? 'sword' : key === 'netherite_axe' ? 'axe' : key;
+}
+
+function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, swordTier, axeTier) {
   const s = pick(spawns);
   // A custom loadout is human-only, and only every key that's actually a
   // real ITEMS entry - anything else (a stale/tampered client) is silently
@@ -295,12 +336,17 @@ function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts) {
     bot: !!isBot,
     kit: MC.KITS[kit] ? kit : (isBot ? defaultBotKit : 'web'),
     customItems: custom,
-    // The human player always wears the full diamond kit (see MC.ARMOR) -
-    // bots pick a tier (default: matches the player's). Every enchant
-    // toggle (armor/sword/axe/bow, see ENCHANT_DEFS) is human-only and
-    // opt-in via the menu; bots always get the defaults, applied in combat
-    // via hasEnchant().
-    armorTier: isBot ? (MC.ARMOR_TIERS[armorTier] ? armorTier : defaultBotArmor) : 'diamond',
+    // The human player always wears the full diamond kit by default (see
+    // MC.ARMOR) - optionally netherite instead, opt-in via the menu's "Use
+    // netherite armor" checkbox. Bots pick a tier the same way (default:
+    // matches the player's). Every enchant toggle (armor/sword/axe/bow, see
+    // ENCHANT_DEFS) is human-only and opt-in via the menu; bots always get
+    // the defaults, applied in combat via hasEnchant().
+    armorTier: isBot ? (MC.ARMOR_TIERS[armorTier] ? armorTier : defaultBotArmor) : (armorTier === 'netherite' ? 'netherite' : 'diamond'),
+    // Same idea as armorTier, but for the sword/axe slot specifically -
+    // human-only (bots always get the plain version); see playerHasItem().
+    swordTier: !isBot && swordTier === 'netherite' ? 'netherite' : 'diamond',
+    axeTier: !isBot && axeTier === 'netherite' ? 'netherite' : 'diamond',
     enchants: isBot ? MC.defaultEnchantOpts() : mergeEnchantOpts(enchantOpts),
     x: s[0], y: s[1], z: s[2],
     vx: 0, vy: 0, vz: 0,
@@ -520,6 +566,12 @@ function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
     // specifically armor it bypasses, not every layer of defense).
     const breach = cause === 'mace' && source && hasEnchant(source, 'mace', 'breach');
     if (!breach) dmg = MC.reduceByArmor(dmg, tier);
+    // Blast Protection (netherite's blastResist, see ARMOR_TIERS): an extra
+    // cut on top of the normal armor formula, only for explosive causes -
+    // a dedicated resistance layer, same as vanilla's separate enchant.
+    if (!breach && tier.blastResist && (cause === 'tnt' || cause === 'firework' || cause === 'crystal' || cause === 'anchor')) {
+      dmg *= (1 - tier.blastResist);
+    }
     const resist = activeEffect(victim, 'resistance', t);
     if (resist) dmg *= (1 - Math.min(1, C.RESISTANCE_PCT_PER_LEVEL * resist.level));
     const canBlock = !!source && source.id !== victim.id && shieldBlocks(victim, source, t);
@@ -571,6 +623,11 @@ function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
   if (blocked) io.emit('effect', { kind: 'block', x: victim.x, y: victim.y + 1.2, z: victim.z });
 
   const kb = { x: kbX || 0, y: kbY === undefined ? 0.42 : kbY, z: kbZ || 0 };
+  // Knockback Resistance (netherite's knockbackResist) - applies to every
+  // hit regardless of cause, unlike Blast Protection above which is
+  // explosive-only.
+  const kbResist = (MC.ARMOR_TIERS[victim.armorTier] || {}).knockbackResist;
+  if (kbResist) { kb.x *= (1 - kbResist); kb.z *= (1 - kbResist); kb.y *= (1 - kbResist); }
   // Don't add upward knockback to a target that's already airborne: during a
   // multi-attacker brawl, hits land faster than gravity can cancel the last
   // launch, so repeatedly refreshing vy upward causes an unbounded climb
@@ -682,6 +739,9 @@ function kill(victim, source, cause) {
     killerName: source && source.id !== victim.id ? source.name : null,
     cause, streak: source ? source.streak : 0
   });
+  // A cosmetic-only strike (no damage) marking where they fell - just the
+  // spectacle, not a hazard for whoever's standing nearby.
+  strikeLightning(victim.x, victim.y + 1, victim.z, null, false);
   broadcastScores();
 }
 
@@ -945,6 +1005,32 @@ function lightGroundFire(x, y, z) {
   io.emit('effect', { kind: 'groundfire', x: x + 0.5, y: fy + 0.2, z: z + 0.5, duration: C.GROUND_FIRE_SECONDS });
 }
 
+/** A lightning strike at (x,y,z) - always broadcasts the visual/sound, and
+ * when `dealDamage` is true also hurts and ignites anyone within
+ * LIGHTNING_STRIKE_RADIUS (bypasses armor, same as fire/lava/fall - it's an
+ * environmental hazard, not a combat hit) and lights a couple of nearby
+ * ground tiles on fire. Used for weather's random strikes and a Channeling
+ * trident hit (both damaging); the cosmetic strike at a death location
+ * passes dealDamage=false - just the spectacle, no punishing a bystander. */
+function strikeLightning(x, y, z, ownerId, dealDamage) {
+  if (dealDamage) {
+    const owner = ownerId ? players.get(ownerId) : null;
+    for (const p of players.values()) {
+      if (!p.alive) continue;
+      const dist = Math.hypot(p.x - x, p.y - y, p.z - z);
+      if (dist > C.LIGHTNING_STRIKE_RADIUS) continue;
+      applyDamage(p, C.LIGHTNING_STRIKE_DMG, owner, 'lightning', 0, 0, 0.3);
+      ignitePlayer(p, now());
+    }
+    const bx = Math.floor(x), bz = Math.floor(z);
+    for (let i = 0; i < 3; i++) {
+      const fx = bx + (rand(-1, 2) | 0), fz = bz + (rand(-1, 2) | 0), fy2 = Math.floor(y) - 1;
+      if (inBounds(fx, fy2, fz) && MC.SOLID[getBlock(fx, fy2, fz)]) lightGroundFire(fx, fy2, fz);
+    }
+  }
+  io.emit('effect', { kind: 'lightning', x, y, z });
+}
+
 function stepProjectiles(dt) {
   const g = { arrow: C.ARROW_GRAVITY, pearl: C.PEARL_GRAVITY, windcharge: C.WINDCHARGE_GRAVITY, potion: C.POTION_GRAVITY, trident: C.TRIDENT_GRAVITY, firework: C.FIREWORK_GRAVITY };
   const alive = [];
@@ -995,9 +1081,14 @@ function stepProjectiles(dt) {
             if (owner && owner.bot) dmg *= botDamageMult(owner);
             const hx = pr.vx, hz = pr.vz;
             const hl = Math.hypot(hx, hz) || 1;
-            let kbMul = 0.5;
+            // Bow boosting: this same arrow hitting its own shooter (only
+            // possible after the 0.12s self-hit grace period above) is a
+            // deliberate mobility trick, not incidental damage - give it a
+            // real forward+upward shove instead of the ordinary hit's kb.
+            const isSelfHit = owner && hit.player.id === owner.id;
+            let kbMul = isSelfHit ? C.BOW_BOOST_KB_MULT : 0.5;
             if (isBowShot && owner && hasEnchant(owner, 'bow', 'punch')) kbMul += C.PUNCH_ENCHANT_ADD;
-            applyDamage(hit.player, Math.round(dmg), owner, 'arrow', (hx / hl) * kbMul, (hz / hl) * kbMul, 0.36);
+            applyDamage(hit.player, Math.round(dmg), owner, 'arrow', (hx / hl) * kbMul, (hz / hl) * kbMul, isSelfHit ? C.BOW_BOOST_KB_Y : 0.36);
             if (pr.burning || (isBowShot && owner && hasEnchant(owner, 'bow', 'flame'))) ignitePlayer(hit.player, t);
             if (owner && owner.socket) owner.socket.emit('arrowHit', { id: hit.player.id, dist: Math.hypot(hit.player.x - owner.x, hit.player.z - owner.z) });
           } else if (pr.kind === 'pearl') {
@@ -1015,7 +1106,7 @@ function stepProjectiles(dt) {
             const kbMul = channeling ? C.TRIDENT_CHANNELING_KB : 0.6;
             const hx = pr.vx, hz = pr.vz, hl = Math.hypot(hx, hz) || 1;
             applyDamage(hit.player, dmg0, owner, 'trident', (hx / hl) * kbMul, (hz / hl) * kbMul, 0.5);
-            if (channeling) io.emit('effect', { kind: 'lightning', x: hit.player.x, y: hit.player.y + 1, z: hit.player.z });
+            if (channeling) strikeLightning(hit.player.x, hit.player.y + 1, hit.player.z, owner ? owner.id : null, true);
           } else if (pr.kind === 'firework') {
             explodeFirework(pr.owner, nx, ny, nz);
           } else {
@@ -1344,15 +1435,19 @@ function stepBot(bot, dt, t) {
       bot.meleeWeapon = pickBotWeapon(bot.kit);
     }
 
-    // melee
+    // melee - hacks (see /bothacks) extend reach, lower the cooldown, and
+    // multiply damage on top of the normal difficulty scaling.
     const weapon = BOT_WEAPONS[bot.meleeWeapon] || BOT_WEAPONS.sword;
-    if (dist < C.REACH_ATTACK - 0.5 && Math.abs(dy) < 2.2 && t - bot.lastAttack > weapon.cooldown / Math.max(0.4, bot.skill)) {
+    const meleeReach = C.REACH_ATTACK + (botHacksEnabled ? BOT_HACKS.reachBonus : 0);
+    const meleeCooldown = weapon.cooldown / Math.max(0.4, bot.skill) / (botHacksEnabled ? BOT_HACKS.cooldownDivisor : 1);
+    if (dist < meleeReach - 0.5 && Math.abs(dy) < 2.2 && t - bot.lastAttack > meleeCooldown) {
       bot.lastAttack = t;
       bot.slot = weapon.slot;
       io.emit('swing', { id: bot.id });
       if (lineOfSight(bot, target)) {
         const l = Math.hypot(dx, dz) || 1;
-        applyDamage(target, weapon.damage * botDamageMult(bot), bot, weapon.key, (dx / l) * 0.55, (dz / l) * 0.55, 0.42);
+        const dmg = weapon.damage * botDamageMult(bot) * (botHacksEnabled ? BOT_HACKS.dmgMult : 1);
+        applyDamage(target, dmg, bot, weapon.key, (dx / l) * 0.55, (dz / l) * 0.55, 0.42);
       }
     }
 
@@ -1434,6 +1529,17 @@ function stepBot(bot, dt, t) {
       }
     }
 
+    // Hacks: place a cobweb right on the target no matter how far away they
+    // are (see /bothacks) - unlike the two cobweb behaviors above, no
+    // distance gate at all.
+    if (botHacksEnabled && t > (ai.nextHackWeb || 0) && Math.random() < 0.2) {
+      ai.nextHackWeb = t + rand(3, 6);
+      const wx = Math.floor(target.x), wy = Math.floor(target.y), wz = Math.floor(target.z);
+      if (getBlock(wx, wy, wz) === ID.AIR && setBlock(wx, wy, wz, ID.COBWEB)) {
+        io.emit('block', { x: wx, y: wy, z: wz, id: ID.COBWEB, by: bot.id });
+      }
+    }
+
     // shield: raise it in short bursts while a fight is close, more often
     // (and for longer) the higher the bot's skill.
     if (bot.blocking) {
@@ -1474,6 +1580,18 @@ function stepBot(bot, dt, t) {
     input.forward = 1;
     if (bot.blocked) input.jump = true;
     bot.blocking = false;
+  }
+
+  // Hacks: a gentle hover instead of properly falling/staying grounded -
+  // slow-falls (capped downward speed) and every so often nudges itself
+  // back up a little, so it drifts and bobs a small height off the ground
+  // instead of true flight.
+  if (botHacksEnabled) {
+    if (!bot.onGround && bot.vy < BOT_HACKS.hoverFallCap) bot.vy = BOT_HACKS.hoverFallCap;
+    if (t > (ai.nextHackHop || 0) && Math.random() < 0.15) {
+      ai.nextHackHop = t + rand(0.6, 1.4);
+      bot.vy = Math.max(bot.vy, BOT_HACKS.hoverHopVy);
+    }
   }
 
   // Elytra + fireworks bonus: glide instead of just falling whenever
@@ -1542,7 +1660,11 @@ function trackFall(p, prevY, wasGround) {
       // ground still has powder snow sitting on it where you land, no damage.
       if (!glided && dist > C.FALL_SAFE && !Physics.inWater(getBlock, p.x, p.y, p.z) &&
           getBlock(Math.floor(p.x), Math.floor(p.y + 0.1), Math.floor(p.z)) !== ID.POWDER_SNOW) {
-        applyDamage(p, Math.floor(dist - C.FALL_SAFE), null, 'fall', 0, 0, 0);
+        // Feather Falling isn't a real enchant here - netherite's fallResist
+        // fills that role instead.
+        const fallResist = (MC.ARMOR_TIERS[p.armorTier] || {}).fallResist || 0;
+        const fallDmg = Math.floor((dist - C.FALL_SAFE) * (1 - fallResist));
+        if (fallDmg > 0) applyDamage(p, fallDmg, null, 'fall', 0, 0, 0);
       }
     }
     p.glidedThisFall = false;
@@ -1568,7 +1690,7 @@ function tick() {
     const alive = [...players.values()].filter(p => p.alive);
     if (alive.length) {
       const p = pick(alive);
-      io.emit('effect', { kind: 'lightning', x: p.x + rand(-6, 6), y: p.y + 1, z: p.z + rand(-6, 6) });
+      strikeLightning(p.x + rand(-6, 6), p.y + 1, p.z + rand(-6, 6), null, true);
     }
   }
 
@@ -1763,7 +1885,7 @@ io.on('connection', socket => {
     // -> treat this as a fresh session and clear whatever got built/broken
     // last time. Never wipes a map other real players are still using.
     if (![...players.values()].some(p => !p.bot)) resetWorld();
-    me = makePlayer(socket.id, name, false, null, kit, data && data.customItems, data && data.enchantOpts);
+    me = makePlayer(socket.id, name, false, data && data.armor, kit, data && data.customItems, data && data.enchantOpts, data && data.swordTier, data && data.axeTier);
     me.socket = socket;
     players.set(me.id, me);
 
@@ -1830,6 +1952,9 @@ io.on('connection', socket => {
     const item = itemForPlayer(me, me.slot);
     if (!item) return;
     if (item.type !== 'weapon' && item.type !== 'tool' && item.type !== 'block' && item.type !== 'bow') return;
+    // netherite_sword/netherite_axe behave exactly like sword/axe for every
+    // enchant/armor/shield-break/looting check below - see baseWeaponKey().
+    const weaponKey = baseWeaponKey(item.key);
     const cd = item.cooldown || 0.3;
     if (t - me.lastAttack < cd * 0.85) return;
     // A thrown trident isn't in hand again until it "returns" - see the
@@ -1886,8 +2011,8 @@ io.on('connection', socket => {
     if (str) dmg += C.STRENGTH_DMG_PER_LEVEL * str.level;
     // Sharpness V (sword/axe) and Knockback III (sword) are opt-in toggles -
     // see ENCHANT_DEFS / the menu's Enchantments panel.
-    if ((item.key === 'sword' || item.key === 'axe') && hasEnchant(me, item.key, 'sharpness')) dmg += C.SHARPNESS_DMG_BONUS;
-    if (item.key === 'sword' && hasEnchant(me, 'sword', 'knockback')) kbMul += C.KNOCKBACK_ENCHANT_ADD;
+    if ((weaponKey === 'sword' || weaponKey === 'axe') && hasEnchant(me, weaponKey, 'sharpness')) dmg += C.SHARPNESS_DMG_BONUS;
+    if (weaponKey === 'sword' && hasEnchant(me, 'sword', 'knockback')) kbMul += C.KNOCKBACK_ENCHANT_ADD;
     // The knockback stick: Knockback V (if on) always wins over II.
     if (item.key === 'stick') {
       if (hasEnchant(me, 'stick', 'knockback5')) kbMul += C.STICK_KB5_ADD;
@@ -1896,13 +2021,13 @@ io.on('connection', socket => {
     if (charged) dmg *= C.SPEAR_CHARGE_DMG_MULT;
     if (me.sprint) kbMul += 0.5;
 
-    const fireAspect = item.key === 'sword' && hasEnchant(me, 'sword', 'fireAspect');
+    const fireAspect = weaponKey === 'sword' && hasEnchant(me, 'sword', 'fireAspect');
     const impaling = item.key === 'trident' && hasEnchant(me, 'trident', 'impaling');
     for (const victim of hits) {
       const dx = victim.x - me.x, dz = victim.z - me.z;
       const l = Math.hypot(dx, dz) || 1;
       const victimDmg = dmg + (impaling && isInWater(victim) ? C.TRIDENT_IMPALING_BONUS_DMG : 0);
-      applyDamage(victim, victimDmg, me, item.key, (dx / l) * 0.55 * kbMul, (dz / l) * 0.55 * kbMul, 0.42);
+      applyDamage(victim, victimDmg, me, weaponKey, (dx / l) * 0.55 * kbMul, (dz / l) * 0.55 * kbMul, 0.42);
       if (fireAspect) ignitePlayer(victim, t);
     }
     if (crit && hits.length) io.emit('effect', { kind: 'crit', x: hits[0].x, y: hits[0].y + 1, z: hits[0].z });
@@ -2159,6 +2284,25 @@ io.on('connection', socket => {
     }
   });
 
+  // A sword hit against a respawn anchor holding at least 1 charge
+  // detonates it early - a shorter fuse for less damage than letting it
+  // reach the full 4 charges, same "trigger it yourself" role hitCrystal
+  // plays for end crystals.
+  socket.on('hitAnchor', d => {
+    if (!me || !me.alive || !d) return;
+    const item = itemForPlayer(me, me.slot);
+    if (!item || baseWeaponKey(item.key) !== 'sword') return;
+    const x = d.x | 0, y = d.y | 0, z = d.z | 0;
+    if (!inBounds(x, y, z)) return;
+    const dist = Math.hypot(x + 0.5 - me.x, y + 0.5 - (me.y + MC.PHYS.EYE), z + 0.5 - me.z);
+    if (dist > C.ANCHOR_SWORD_HIT_REACH) return;
+    if (getBlock(x, y, z) !== ID.RESPAWN_ANCHOR) return;
+    const key = x + ',' + y + ',' + z;
+    if ((anchorCharges.get(key) || 0) < 1) return;
+    anchorCharges.delete(key);
+    detonateAnchor(x, y, z, me.id);
+  });
+
   socket.on('chat', text => {
     if (!me) return;
     let msg = String(text || '').slice(0, 140).trim();
@@ -2171,6 +2315,19 @@ io.on('connection', socket => {
     const parts = msg.slice(1).split(/\s+/);
     const cmd = parts[0].toLowerCase();
     const reply = text => socket.emit('chat', { system: true, text });
+    // Secret, undocumented (not in /help) unlock for elytra - a one-way
+    // switch for this player's current session, not a toggle. See
+    // playerHasItem()'s elytra check.
+    if (cmd === 'elytra257') {
+      if (!me.elytraUnlocked) {
+        me.elytraUnlocked = true;
+        reply('Elytra unlocked.');
+        socket.emit('elytraUnlocked');
+      } else {
+        reply('Elytra is already unlocked.');
+      }
+      return;
+    }
     if (cmd === 'bots') {
       const want = clamp(parseInt(parts[1], 10) || 0, 0, 16);
       const diffArg = (parts[2] || '').toLowerCase();
@@ -2228,6 +2385,11 @@ io.on('connection', socket => {
       if (arg !== 'on' && arg !== 'off') { reply('Usage: /botteam <on|off>'); return; }
       botsCooperate = arg === 'on';
       io.emit('chat', { system: true, text: me.name + (botsCooperate ? ' made the bots team up against you' : ' let the bots go back to fighting each other') });
+    } else if (cmd === 'bothacks') {
+      const arg = (parts[1] || '').toLowerCase();
+      if (arg !== 'on' && arg !== 'off') { reply('Usage: /bothacks <on|off>'); return; }
+      botHacksEnabled = arg === 'on';
+      io.emit('chat', { system: true, text: me.name + (botHacksEnabled ? ' gave the bots hacks (webs from anywhere, longer reach, more damage, faster hits, hovering)' : ' turned off bot hacks') });
     } else if (cmd === 'difficulty') {
       const key = (parts[1] || '').toLowerCase();
       if (!DIFFICULTY[key]) { reply('Usage: /difficulty <easy|normal|hard|random>'); return; }
@@ -2238,7 +2400,7 @@ io.on('connection', socket => {
       broadcastScores();
     } else if (cmd === 'botarmor') {
       const key = (parts[1] || '').toLowerCase();
-      if (!MC.ARMOR_TIERS[key]) { reply('Usage: /botarmor <none|leather|iron|diamond>'); return; }
+      if (!MC.ARMOR_TIERS[key]) { reply('Usage: /botarmor <none|leather|iron|diamond|netherite>'); return; }
       defaultBotArmor = key;
       let changed = 0;
       for (const p of players.values()) { if (p.bot && !p.dummy) { setBotArmor(p, key); changed++; } }
@@ -2285,7 +2447,7 @@ io.on('connection', socket => {
       io.emit('weather', { kind: weather });
       io.emit('chat', { system: true, text: me.name + ' set the weather to ' + weather });
     } else if (cmd === 'help') {
-      reply('Commands: /bots <0-16> [difficulty] [armor] [kit] [weapon], /difficulty <easy|normal|hard|random>, /botarmor <none|leather|iron|diamond>, /botkit <sword|axe|web>, /botweapon <fixed|versatile|full>, /botteam <on|off>, /kit <sword|axe|web>, /botdiff <name> <level>, /dummy <0-3> [shield|noshield], /atkdummy <0-3>, /weather <clear|rain|thunder>, /spawn, /kill, /help');
+      reply('Commands: /bots <0-16> [difficulty] [armor] [kit] [weapon], /difficulty <easy|normal|hard|random>, /botarmor <none|leather|iron|diamond|netherite>, /botkit <sword|axe|web>, /botweapon <fixed|versatile|full>, /botteam <on|off>, /bothacks <on|off>, /kit <sword|axe|web>, /botdiff <name> <level>, /dummy <0-3> [shield|noshield], /atkdummy <0-3>, /weather <clear|rain|thunder>, /spawn, /kill, /help');
     } else {
       reply('Unknown command: ' + cmd + ' (try /help)');
     }

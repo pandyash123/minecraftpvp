@@ -527,8 +527,8 @@
   // this is drawn as its own inflated box shell over the body (see
   // MCEntities.armorParts / Renderer.drawArmorLayer), not a tint on the
   // skin, so it reads as "wearing plates" rather than "recolored".
-  const ARMOR_COLORS = { leather: '#8a5a2e', iron: '#d3d5d8', diamond: '#3fd0c9' };
-  const ARMOR_FLECKS = { leather: '#c9915a', iron: '#ffffff', diamond: '#c8fff9' };
+  const ARMOR_COLORS = { leather: '#8a5a2e', iron: '#d3d5d8', diamond: '#3fd0c9', netherite: '#17161a' };
+  const ARMOR_FLECKS = { leather: '#c9915a', iron: '#ffffff', diamond: '#c8fff9', netherite: '#6a5a52' };
   function paintArmor(tier) {
     const cv = document.createElement('canvas');
     cv.width = cv.height = 64;
@@ -683,8 +683,11 @@
     g.beginPath(); g.arc(S * 0.38, S * 0.55, S * 0.05, 0, 6.29); g.fill();
   }
 
-  /** Hand-drawn pixel icons for the non-block kit items. */
-  function itemIcon(key, size) {
+  /** Hand-drawn pixel icons for the non-block kit items. `tier` only matters
+   * for the 4 armor-piece keys (helmet/chestplate/leggings/boots) - pass the
+   * player's actual armorTier so netherite renders in its own near-black
+   * palette instead of always looking like diamond. */
+  function itemIcon(key, size, tier) {
     const S = size || 48;
     const cv = document.createElement('canvas');
     cv.width = cv.height = S;
@@ -692,13 +695,15 @@
     const u = S / 16;
     const P = (x, y, w, h, c) => { g.fillStyle = c; g.fillRect(x * u, y * u, w * u, h * u); };
 
-    if (key === 'sword') {
+    if (key === 'sword' || key === 'netherite_sword') {
       // Diamond Sword (Sharpness V): pale cyan blade instead of iron-grey.
+      // The netherite version swaps in a near-black blade instead.
+      const netherite = key === 'netherite_sword';
       P(3, 11, 3, 2, '#5a3d1e');          // handle
       P(4, 10, 5, 2, '#8a6a3a');          // guard
-      for (let i = 0; i < 8; i++) P(5 + i, 8 - i, 2, 2, '#7de3e0');
-      for (let i = 0; i < 8; i++) P(5 + i, 8 - i, 1, 1, '#c8fef9');
-      P(12, 2, 2, 2, '#eafffd');
+      for (let i = 0; i < 8; i++) P(5 + i, 8 - i, 2, 2, netherite ? '#1c1a1e' : '#7de3e0');
+      for (let i = 0; i < 8; i++) P(5 + i, 8 - i, 1, 1, netherite ? '#413a3f' : '#c8fef9');
+      P(12, 2, 2, 2, netherite ? '#5a5058' : '#eafffd');
     } else if (key === 'pick') {
       P(4, 11, 2, 4, '#5a3d1e');
       P(5, 9, 2, 3, '#6b4a25');
@@ -706,10 +711,11 @@
       P(2, 7, 3, 2, '#c2cad4');
       P(11, 7, 3, 2, '#c2cad4');
       P(4, 6, 8, 1, '#ffffff');
-    } else if (key === 'axe') {
+    } else if (key === 'axe' || key === 'netherite_axe') {
+      const netheriteAxe = key === 'netherite_axe';
       P(6, 8, 2, 6, '#5a3d1e');
       P(6, 6, 2, 3, '#6b4a25');
-      g.fillStyle = '#c2cad4';
+      g.fillStyle = netheriteAxe ? '#211f23' : '#c2cad4';
       g.beginPath();
       g.moveTo(S * 0.44, S * 0.32);
       g.lineTo(S * 0.88, S * 0.16);
@@ -718,12 +724,12 @@
       g.lineTo(S * 0.44, S * 0.52);
       g.closePath();
       g.fill();
-      g.fillStyle = '#eef2f6';
+      g.fillStyle = netheriteAxe ? '#463e40' : '#eef2f6';
       g.beginPath();
       g.moveTo(S * 0.58, S * 0.30); g.lineTo(S * 0.84, S * 0.20); g.lineTo(S * 0.89, S * 0.32); g.lineTo(S * 0.62, S * 0.42);
       g.closePath();
       g.fill();
-      g.strokeStyle = '#7d8791';
+      g.strokeStyle = netheriteAxe ? '#0a0a0b' : '#7d8791';
       g.lineWidth = Math.max(1, u * 0.4);
       g.stroke();
     } else if (key === 'bow') {
@@ -761,36 +767,46 @@
       P(7, 2, 2, 3, '#6b4a25');
       g.fillStyle = '#4caf50';
       g.beginPath(); g.ellipse(S * 0.62, S * 0.2, S * 0.14, S * 0.07, -0.5, 0, 6.29); g.fill();
-    } else if (key === 'helmet') {
-      P(4, 2, 8, 3, '#6fd8d4');
-      P(3, 5, 10, 3, '#57c2be');
-      P(5, 5, 2, 2, '#173230');
-      P(9, 5, 2, 2, '#173230');
-      P(4, 2, 8, 1, '#c8fef9');
-      P(3, 2, 1, 6, '#3fa9a6');
-      P(12, 2, 1, 6, '#3fa9a6');
-    } else if (key === 'chestplate') {
-      P(3, 2, 3, 2, '#57c2be');
-      P(10, 2, 3, 2, '#57c2be');
-      P(3, 4, 10, 7, '#6fd8d4');
-      P(6, 4, 4, 7, '#57c2be');
-      P(3, 4, 1, 7, '#3fa9a6');
-      P(12, 4, 1, 7, '#3fa9a6');
-      P(4, 2, 2, 1, '#c8fef9');
-    } else if (key === 'leggings') {
-      P(4, 2, 8, 2, '#57c2be');
-      P(4, 4, 3, 8, '#6fd8d4');
-      P(9, 4, 3, 8, '#6fd8d4');
-      P(4, 4, 1, 8, '#c8fef9');
-      P(6, 11, 1, 1, '#3fa9a6');
-      P(9, 11, 1, 1, '#3fa9a6');
-    } else if (key === 'boots') {
-      P(4, 9, 3, 4, '#6fd8d4');
-      P(9, 9, 3, 4, '#6fd8d4');
-      P(3, 12, 4, 1, '#3fa9a6');
-      P(9, 12, 4, 1, '#3fa9a6');
-      P(4, 9, 3, 1, '#c8fef9');
-      P(9, 9, 3, 1, '#c8fef9');
+    } else if (key === 'helmet' || key === 'chestplate' || key === 'leggings' || key === 'boots') {
+      // Diamond's cyan palette, or netherite's near-black one (matching the
+      // 3D armor layer's ARMOR_COLORS/ARMOR_FLECKS) if that tier was passed in.
+      const netheriteArmor = tier === 'netherite';
+      const main = netheriteArmor ? '#221f24' : '#6fd8d4';
+      const shadow = netheriteArmor ? '#17161a' : '#57c2be';
+      const trim = netheriteArmor ? '#0d0c0f' : '#3fa9a6';
+      const shade = netheriteArmor ? '#0c0b0d' : '#173230';
+      const highlight = netheriteArmor ? '#6a5a52' : '#c8fef9';
+      if (key === 'helmet') {
+        P(4, 2, 8, 3, main);
+        P(3, 5, 10, 3, shadow);
+        P(5, 5, 2, 2, shade);
+        P(9, 5, 2, 2, shade);
+        P(4, 2, 8, 1, highlight);
+        P(3, 2, 1, 6, trim);
+        P(12, 2, 1, 6, trim);
+      } else if (key === 'chestplate') {
+        P(3, 2, 3, 2, shadow);
+        P(10, 2, 3, 2, shadow);
+        P(3, 4, 10, 7, main);
+        P(6, 4, 4, 7, shadow);
+        P(3, 4, 1, 7, trim);
+        P(12, 4, 1, 7, trim);
+        P(4, 2, 2, 1, highlight);
+      } else if (key === 'leggings') {
+        P(4, 2, 8, 2, shadow);
+        P(4, 4, 3, 8, main);
+        P(9, 4, 3, 8, main);
+        P(4, 4, 1, 8, highlight);
+        P(6, 11, 1, 1, trim);
+        P(9, 11, 1, 1, trim);
+      } else if (key === 'boots') {
+        P(4, 9, 3, 4, main);
+        P(9, 9, 3, 4, main);
+        P(3, 12, 4, 1, trim);
+        P(9, 12, 4, 1, trim);
+        P(4, 9, 3, 1, highlight);
+        P(9, 9, 3, 1, highlight);
+      }
     } else if (key === 'mace') {
       // Mace (Density V, Wind Burst III): studded head on a short haft.
       P(6, 5, 3, 9, '#4a3a2e');

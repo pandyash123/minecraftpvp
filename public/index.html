@@ -103,6 +103,9 @@
       </select>
       <label class="checkline"><input type="checkbox" id="customLoadoutCheck"> Use a custom loadout instead (pick your own items below)</label>
       <div id="customItemsList" class="hidden itemchecklist"></div>
+      <label class="checkline"><input type="checkbox" id="netheriteArmorCheck"> Use netherite armor instead of diamond (knockback/fall/blast resistance, a little extra protection)</label>
+      <label class="checkline"><input type="checkbox" id="netheriteSwordCheck"> Use netherite sword instead of diamond (slightly more damage)</label>
+      <label class="checkline"><input type="checkbox" id="netheriteAxeCheck"> Use netherite axe instead of iron (slightly more damage)</label>
       <p class="sub">Enchantments (armor/sword/axe/bow) are in their own panel below.</p>
       <label>Bots to fill the arena with (0-16)</label>
       <input id="botsInput" type="number" min="0" max="16" value="4">
@@ -119,6 +122,7 @@
         <option value="leather">Leather</option>
         <option value="iron">Iron</option>
         <option value="diamond" selected>Diamond (Protection IV)</option>
+        <option value="netherite">Netherite (Protection IV + resistances)</option>
       </select>
       <label>Bot kit</label>
       <select id="botKitSelect">
@@ -156,6 +160,7 @@
         <option value="full">Full kit (versatile + cobwebs, never builds)</option>
       </select>
       <label class="checkline"><input type="checkbox" id="botTeamCheck"> Bots work together against you (won't fight each other)</label>
+      <label class="checkline"><input type="checkbox" id="botHacksCheck"> Give bots hacks (webs from anywhere, longer reach, more damage, faster hits, hovering)</label>
     </div>
 
     <div class="panel wide" id="enchantPanel">

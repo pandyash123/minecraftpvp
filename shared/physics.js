@@ -191,8 +191,13 @@
       e.vx += dirX * pull; e.vy += dirY * pull; e.vz += dirZ * pull;
       e.vx *= EL.ELYTRA_DRAG; e.vy *= EL.ELYTRA_DRAG; e.vz *= EL.ELYTRA_DRAG;
       var spd = Math.hypot(e.vx, e.vy, e.vz);
-      if (spd > EL.ELYTRA_MAX_SPEED) {
-        var s = EL.ELYTRA_MAX_SPEED / spd;
+      // Plain gliding is deliberately capped low - a firework boost (see
+      // game.js/server.js, which sets input.boosted for a short window
+      // after one lands) raises the ceiling instead of immediately getting
+      // clamped back down to the same speed as an unboosted glide.
+      var cap = input.boosted ? EL.ELYTRA_BOOST_MAX_SPEED : EL.ELYTRA_MAX_SPEED;
+      if (spd > cap) {
+        var s = cap / spd;
         e.vx *= s; e.vy *= s; e.vz *= s;
       }
     } else {

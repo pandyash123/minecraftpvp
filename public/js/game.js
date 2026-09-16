@@ -31,13 +31,14 @@
         chargeWrap: el('chargeWrap'), chargeFill: el('chargeFill'),
         menu: el('menu'), nameInput: el('nameInput'), playBtn: el('playBtn'), botsInput: el('botsInput'),
         kitSelect: el('kitSelect'), botKitSelect: el('botKitSelect'),
-        botWeaponSelect: el('botWeaponSelect'), botTeamCheck: el('botTeamCheck'),
+        botWeaponSelect: el('botWeaponSelect'), botTeamCheck: el('botTeamCheck'), botHacksCheck: el('botHacksCheck'),
         difficultySelect: el('difficultySelect'), armorSelect: el('armorSelect'), dummyCheck: el('dummyCheck'),
         dummyShieldCheck: el('dummyShieldCheck'),
         atkDummyCheck: el('atkDummyCheck'), dmgNumbersCheck: el('dmgNumbersCheck'), resetTerrainBtn: el('resetTerrainBtn'), resetTerrainMsg: el('resetTerrainMsg'),
         inventory: el('inventory'), mainInventory: el('mainInventory'), invHotbar: el('invHotbar'),
         pauseMenu: el('pauseMenu'), resumeBtn: el('resumeBtn'), leaveBtn: el('leaveBtn'),
         customLoadoutCheck: el('customLoadoutCheck'), customItemsList: el('customItemsList'),
+        netheriteArmorCheck: el('netheriteArmorCheck'), netheriteSwordCheck: el('netheriteSwordCheck'), netheriteAxeCheck: el('netheriteAxeCheck'),
         enchantList: el('enchantList'),
         effectsBar: el('effectsBar')
       };
@@ -97,9 +98,14 @@
      * checked in the menu's item list) starts equipped (hotbar), backpack
      * starts empty. Fewer than 9 items just leaves trailing hotbar slots
      * empty. */
-    _initInventorySlots(kitKey, customItemKeys) {
+    _initInventorySlots(kitKey, customItemKeys, swordTier, axeTier) {
       this.kit = MC.KITS[kitKey] ? kitKey : 'web';
-      const itemKeys = customItemKeys && customItemKeys.length ? customItemKeys : MC.KITS[this.kit].items;
+      let itemKeys = customItemKeys && customItemKeys.length ? customItemKeys : MC.KITS[this.kit].items;
+      // netherite_sword/netherite_axe are a tier swap on top of sword/axe
+      // (see the menu's checkboxes), not a separate item picked alongside
+      // them - swap the key in place so the hotbar only ever shows one.
+      if (swordTier === 'netherite') itemKeys = itemKeys.map(k => k === 'sword' ? 'netherite_sword' : k);
+      if (axeTier === 'netherite') itemKeys = itemKeys.map(k => k === 'axe' ? 'netherite_axe' : k);
       const indices = itemKeys.map(key => ITEMS.findIndex(i => i.key === key)).filter(idx => idx !== -1);
       this.hotbarSlots = new Array(9).fill(null);
       this.backpackSlots = new Array(27).fill(null);
@@ -184,6 +190,13 @@
       const defaults = new Set(MC.KITS.web.items);
       list.innerHTML = '';
       for (const item of ITEMS) {
+        // Netherite sword/axe aren't independently selectable - they're a
+        // tier swap on the regular sword/axe (see the checkboxes right
+        // below this list), always exactly one of each in a loadout.
+        if (item.key === 'netherite_sword' || item.key === 'netherite_axe') continue;
+        // Elytra is locked behind the secret '/elytra257' chat command, not
+        // a normal loadout pick - see net.on('elytraUnlocked', ...) below.
+        if (item.key === 'elytra') continue;
         const label = document.createElement('label');
         label.className = 'checkline itemcheck';
         const box = document.createElement('input');
@@ -241,10 +254,13 @@
       this.selfName = name;
       const customItems = this._customItemsFromMenu();
       const enchantOpts = this._enchantOptsFromMenu();
+      const armor = this.hud.netheriteArmorCheck && this.hud.netheriteArmorCheck.checked ? 'netherite' : 'diamond';
+      const swordTier = this.hud.netheriteSwordCheck && this.hud.netheriteSwordCheck.checked ? 'netherite' : 'diamond';
+      const axeTier = this.hud.netheriteAxeCheck && this.hud.netheriteAxeCheck.checked ? 'netherite' : 'diamond';
       this.hud.menu.classList.add('hidden');
       this.hud.loading.classList.remove('hidden');
       global.MCSound.resume();
-      this.start(name, kit, customItems, enchantOpts).catch(err => {
+      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier).catch(err => {
         console.error(err);
         this.hud.loading.classList.add('hidden');
         this.hud.menu.classList.remove('hidden');
@@ -252,14 +268,19 @@
       });
     }
 
-    async start(name, kit, customItems, enchantOpts) {
-      this._initInventorySlots(kit, customItems);
+    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier) {
+      // Drives the armor-piece icon color in the inventory (see
+      // _buildInventoryUI/_renderChestSlot) - the human player's own tier
+      // isn't part of `this.me` (only remote players carry .armor, from
+      // publicPlayer()), so it's tracked here instead.
+      this.armorTier = armor === 'netherite' ? 'netherite' : 'diamond';
+      this._initInventorySlots(kit, customItems, swordTier, axeTier);
       // Kept purely for client-side-only cosmetics/pacing that don't need a
       // server round-trip (currently just the pickaxe's Efficiency V mining
       // speed) - combat-relevant enchants are already re-validated server-side
       // regardless of what this holds.
       this.myEnchants = enchantOpts || MC.defaultEnchantOpts();
-      const init = await this.net.connect(name, this.kit, customItems, enchantOpts);
+      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier);
       this.world = new global.MCWorld(init.seed);
       this.world.applyEdits(init.edits || []);
       // The WebGL context (and everything already uploaded into it - block
@@ -314,6 +335,7 @@
       const botWeapon = this.hud.botWeaponSelect ? this.hud.botWeaponSelect.value : 'fixed';
       if (requestedBots >= 0) this.net.chat('/bots ' + Math.max(0, Math.min(16, requestedBots)) + ' ' + difficulty + ' ' + botArmor + ' ' + botKit + ' ' + botWeapon);
       this.net.chat('/botteam ' + (this.hud.botTeamCheck && this.hud.botTeamCheck.checked ? 'on' : 'off'));
+      this.net.chat('/bothacks ' + (this.hud.botHacksCheck && this.hud.botHacksCheck.checked ? 'on' : 'off'));
       if (this.hud.dummyCheck && this.hud.dummyCheck.checked) {
         const wantShield = !this.hud.dummyShieldCheck || this.hud.dummyShieldCheck.checked;
         this.net.chat('/dummy 1 ' + (wantShield ? 'shield' : 'noshield'));
@@ -506,6 +528,23 @@
       net.on('swing', d => { const r = this.remote.get(d.id); if (r) { r.swingT = 0.001; } });
       net.on('effect', d => this._spawnEffect(d));
       net.on('weather', d => { this.weather = d.kind; });
+      // Secret '/elytra257' unlock landed - add it to the loadout live
+      // (first open hotbar slot, else backpack) instead of requiring a
+      // rejoin, and rebuild whatever UI shows the loadout.
+      net.on('elytraUnlocked', () => {
+        const elytraIdx = ITEMS.findIndex(i => i.key === 'elytra');
+        if (elytraIdx === -1) return;
+        if (this.hotbarSlots.includes(elytraIdx) || this.backpackSlots.includes(elytraIdx)) return;
+        let placed = false;
+        const hbPos = this.hotbarSlots.indexOf(null);
+        if (hbPos !== -1) { this.hotbarSlots[hbPos] = elytraIdx; placed = true; }
+        if (!placed) {
+          const bpPos = this.backpackSlots.indexOf(null);
+          if (bpPos !== -1) { this.backpackSlots[bpPos] = elytraIdx; placed = true; }
+        }
+        this._buildHotbar();
+        if (this.inventoryOpen) this._buildInventoryUI();
+      });
       net.on('death', d => {
         if (d.victim === this.me.id) this._onSelfDeath(d);
         else { const r = this.remote.get(d.victim); if (r) r.alive = false; }
@@ -706,7 +745,7 @@
           if (!key) return;
           const piece = MC.ARMOR[key];
           slot.innerHTML = '';
-          slot.appendChild(global.MCTextures.itemIcon(key, 36));
+          slot.appendChild(global.MCTextures.itemIcon(key, 36, this.armorTier));
           const tag = document.createElement('div');
           tag.className = 'count';
           tag.textContent = 'IV';
@@ -740,7 +779,7 @@
         chestEl.appendChild(global.MCTextures.itemIcon('elytra', 36));
         chestEl.title = 'Elytra (drag out, or right-click it, to swap the chestplate back in)';
       } else {
-        chestEl.appendChild(global.MCTextures.itemIcon('chestplate', 36));
+        chestEl.appendChild(global.MCTextures.itemIcon('chestplate', 36, this.armorTier));
         const tag = document.createElement('div');
         tag.className = 'count';
         tag.textContent = 'IV';
@@ -802,7 +841,7 @@
         cell.className = 'slot invslot' + (typeof idx === 'number' && idx === this.me.slot ? ' active' : '') + (idx === null ? ' empty' : '');
         cell.dataset.pos = pos;
         if (isChestplate) {
-          cell.appendChild(global.MCTextures.itemIcon('chestplate', 36));
+          cell.appendChild(global.MCTextures.itemIcon('chestplate', 36, this.armorTier));
           const tag = document.createElement('div');
           tag.className = 'count';
           tag.textContent = 'IV';
@@ -1008,13 +1047,28 @@
       if (!this.me || !this.me.alive) return;
       const item = ITEMS[this.me.slot];
       // Hitting an end crystal detonates it, regardless of what's held -
-      // checked first since it's block-aimed (a precise raycast), not the
-      // forgiving nearby-player melee targeting below.
+      // checked first since it's block-aimed. A strict raycast alone misses
+      // constantly at melee range (you're standing right next to it, not
+      // lined up dead-center) so fall back to a forgiving nearby search,
+      // same fix as the respawn anchor's glowstone-charge targeting.
       const pick = this._pick();
-      if (pick && pick.type === 'block' && pick.block.block === ID.END_CRYSTAL && pick.dist <= C.REACH_ATTACK) {
-        this.net.hitCrystal(pick.block.x, pick.block.y, pick.block.z);
+      const exactCrystal = (pick && pick.type === 'block' && pick.block.block === ID.END_CRYSTAL && pick.dist <= C.REACH_ATTACK) ? pick.block : null;
+      const crystal = exactCrystal || this._findNearbyBlock(ID.END_CRYSTAL, C.REACH_ATTACK);
+      if (crystal) {
+        this.net.hitCrystal(crystal.x, crystal.y, crystal.z);
         this._swingLocal();
         return;
+      }
+      // A sword hit against a charged respawn anchor detonates it early -
+      // same forgiving block targeting as the crystal above.
+      if (item.key === 'sword' || item.key === 'netherite_sword') {
+        const exactAnchor = (pick && pick.type === 'block' && pick.block.block === ID.RESPAWN_ANCHOR && pick.dist <= C.REACH_ATTACK) ? pick.block : null;
+        const anchor = exactAnchor || this._findNearbyBlock(ID.RESPAWN_ANCHOR, C.REACH_ATTACK);
+        if (anchor) {
+          this.net.hitAnchor(anchor.x, anchor.y, anchor.z);
+          this._swingLocal();
+          return;
+        }
       }
       if (item.type === 'weapon' || item.type === 'tool') {
         if (item.pierce) {
@@ -1076,7 +1130,7 @@
           // _pickAttackTarget's forgiving melee targeting) if the strict
           // raycast doesn't land exactly on the anchor's block face - lets
           // charging work without needing pixel-perfect aim.
-          const anchor = exact || this._findNearbyAnchor(C.REACH_BLOCK);
+          const anchor = exact || this._findNearbyBlock(ID.RESPAWN_ANCHOR, C.REACH_BLOCK);
           if (anchor) {
             const t = performance.now();
             if ((item.ammo !== undefined && this.ammo.glowstone <= 0) || t - this.lastPlaceAt < 180) return;
@@ -1161,6 +1215,10 @@
         this.me.vx += dir[0] * C.FIREWORK_BOOST_SPEED;
         this.me.vy += dir[1] * C.FIREWORK_BOOST_SPEED;
         this.me.vz += dir[2] * C.FIREWORK_BOOST_SPEED;
+        // Raises the glide speed cap (see input.boosted in physics.js) for a
+        // few seconds - without this a firework boost would just get
+        // clamped straight back down to the same slow plain-glide ceiling.
+        this._boostedUntil = performance.now() / 1000 + C.ELYTRA_BOOST_WINDOW;
         global.MCSound.fireworkLaunch();
       }
       // bow charging is handled continuously in update() via rightDownAt
@@ -1309,13 +1367,14 @@
     }
 
     /**
-     * Forgiving respawn-anchor targeting: nearest one within reach and
-     * roughly in front of the camera, same shape as _pickAttackTarget above
-     * - a strict raycast hit on the exact block face misses constantly at
-     * charging range (you're standing right next to it), so glowstone
-     * charging shouldn't require pixel-perfect aim either.
+     * Forgiving block targeting: nearest block of the given id within reach
+     * and roughly in front of the camera, same shape as _pickAttackTarget
+     * above - a strict raycast hit on the exact block face misses
+     * constantly at melee/charging range (you're standing right next to
+     * it), so hitting a crystal, sword-hitting an anchor, or charging one
+     * with glowstone shouldn't require pixel-perfect aim either.
      */
-    _findNearbyAnchor(reach) {
+    _findNearbyBlock(blockId, reach) {
       const eye = [this.me.x, this.me.y + PHYS.EYE, this.me.z];
       const dir = this._lookDir();
       const r = Math.ceil(reach);
@@ -1324,7 +1383,7 @@
       for (let bx = px - r; bx <= px + r; bx++) {
         for (let by = py - r; by <= py + r; by++) {
           for (let bz = pz - r; bz <= pz + r; bz++) {
-            if (this.world.get(bx, by, bz) !== ID.RESPAWN_ANCHOR) continue;
+            if (this.world.get(bx, by, bz) !== blockId) continue;
             const cx = bx + 0.5, cy = by + 0.5, cz = bz + 0.5;
             const dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
             const dist = Math.hypot(dx, dy, dz);
@@ -1531,7 +1590,7 @@
       const wasGround = this.me.onGround;
       const prevY = this.me.y;
       Physics.step((x, y, z) => this.world.get(x, y, z), this.me,
-        { forward, strafe, jump, sneak: this.me.sneak, sprint: this.me.sprint, block: this.me.blocking, yaw: this.yaw, pitch: this.pitch, dashing: lunging, glide: this.gliding, speedMult }, dt);
+        { forward, strafe, jump, sneak: this.me.sneak, sprint: this.me.sprint, block: this.me.blocking, yaw: this.yaw, pitch: this.pitch, dashing: lunging, glide: this.gliding, speedMult, boosted: performance.now() / 1000 < (this._boostedUntil || 0) }, dt);
 
       if (!wasGround && this.me.onGround) {
         const fell = prevY - this.me.y;
@@ -1756,20 +1815,22 @@
         // A visible bolt "sketched" as a tall stack of bright particles
         // (no dedicated line-drawing in the renderer) plus a bright crackle
         // burst at the strike point, and a screen-wide flash if it's close.
-        for (let i = 0; i < 24; i++) {
-          const h = i / 23;
+        // Sized up to match the real area-damage/ignite radius it now
+        // carries server-side, not just a cosmetic flicker anymore.
+        for (let i = 0; i < 34; i++) {
+          const h = i / 33;
           this.particlesMeta.push({
-            x: d.x + (Math.random() - 0.5) * 0.3 * h, y: d.y + h * 14, z: d.z + (Math.random() - 0.5) * 0.3 * h,
-            vx: (Math.random() - 0.5) * 0.5, vy: 0, vz: (Math.random() - 0.5) * 0.5,
-            r: 0.85, g: 0.9, b: 1, a: 1, size: 0.14, life: 0.25, t: 0
+            x: d.x + (Math.random() - 0.5) * 0.6 * h, y: d.y + h * 20, z: d.z + (Math.random() - 0.5) * 0.6 * h,
+            vx: (Math.random() - 0.5) * 0.7, vy: 0, vz: (Math.random() - 0.5) * 0.7,
+            r: 0.85, g: 0.9, b: 1, a: 1, size: 0.2, life: 0.3, t: 0
           });
         }
-        for (let i = 0; i < 18; i++) this.particlesMeta.push({
-          x: d.x, y: d.y, z: d.z, vx: (Math.random() - 0.5) * 4, vy: Math.random() * 3, vz: (Math.random() - 0.5) * 4,
-          r: 0.8, g: 0.88, b: 1, a: 1, size: 0.12, life: 0.4, t: 0, gravity: true
+        for (let i = 0; i < 30; i++) this.particlesMeta.push({
+          x: d.x, y: d.y, z: d.z, vx: (Math.random() - 0.5) * 7, vy: Math.random() * 4, vz: (Math.random() - 0.5) * 7,
+          r: 0.8, g: 0.88, b: 1, a: 1, size: 0.2, life: 0.5, t: 0, gravity: true
         });
         const dist = Math.hypot(d.x - this.me.x, d.y - this.me.y, d.z - this.me.z);
-        this._lightningFlashT = clamp(0.5 - dist / 60, 0, 0.5);
+        this._lightningFlashT = clamp(0.65 - dist / 70, 0, 0.65);
         global.MCSound.thunder();
       } else if (d.kind === 'fuse') {
         // A lit TNT block: a handful of little sparks while the fuse burns.
@@ -1940,7 +2001,7 @@
         const isChestplate = idx === 'chestplate';
         cell.className = 'slot' + (typeof idx === 'number' && idx === this.me.slot ? ' active' : '') + (idx === null ? ' empty' : '');
         if (isChestplate) {
-          cell.appendChild(global.MCTextures.itemIcon('chestplate', 40));
+          cell.appendChild(global.MCTextures.itemIcon('chestplate', 40, this.armorTier));
           const tag = document.createElement('div');
           tag.className = 'count';
           tag.textContent = 'IV';
@@ -2137,6 +2198,19 @@
       // remote players
       for (const p of this.remote.values()) {
         if (!p.alive) continue;
+        // Fully fogged out at this range anyway (see fogFar above) - skip
+        // the whole draw+nametag sequence rather than rendering something
+        // invisible. A real win once a 16-bot arena scatters half the
+        // roster past typical fight range; zero visual difference since
+        // they were already indistinguishable from the fog. Their nametag
+        // DOM node (if it exists from being in range a moment ago) has to be
+        // explicitly hidden here too, or it freezes in its last position
+        // instead of following _drawNameTag's own distance fade.
+        if (Math.hypot(p.x - eye[0], p.y - eye[1], p.z - eye[2]) > fogFar) {
+          const tag = this._tags && this._tags.get(p.id);
+          if (tag) tag.node.style.display = 'none';
+          continue;
+        }
         if (!p.skin) p.skin = r.getSkin(p.name);
         const heldItem = ITEMS[p.slot || 0];
         const pose = poseFor(p.walkPhase || 0, p.swingT, heldItem, p.blocking);
@@ -2235,8 +2309,12 @@
       const sx = (ndcX * 0.5 + 0.5) * window.innerWidth;
       const sy = (1 - (ndcY * 0.5 + 0.5)) * window.innerHeight;
       node.style.display = 'block';
-      node.style.left = sx + 'px';
-      node.style.top = sy + 'px';
+      // translate3d instead of left/top - with a full 16-bot arena this runs
+      // once per visible nametag every frame, and left/top forces a layout
+      // reflow each time where a transform is GPU-composited instead. The
+      // -50%/-100% centering offset (see .nametag in style.css) moves into
+      // this same transform chain since setting it here overrides the CSS one.
+      node.style.transform = 'translate3d(' + sx + 'px,' + sy + 'px,0) translate(-50%,-100%)';
       const dist = Math.hypot(p.x - this.me.x, p.y - this.me.y, p.z - this.me.z);
       node.style.opacity = dist > 55 ? '0' : '1';
     }
@@ -2275,8 +2353,8 @@
         const sx = (ndcX * 0.5 + 0.5) * window.innerWidth;
         const sy = (1 - (ndcY * 0.5 + 0.5)) * window.innerHeight;
         d.node.style.display = 'block';
-        d.node.style.left = sx + 'px';
-        d.node.style.top = sy + 'px';
+        // Same transform-instead-of-left/top reflow fix as _drawNameTag.
+        d.node.style.transform = 'translate3d(' + sx + 'px,' + sy + 'px,0) translate(-50%,-100%)';
         d.node.style.opacity = String(Math.max(0, 1 - frac));
       }
     }

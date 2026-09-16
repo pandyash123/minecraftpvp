@@ -186,9 +186,13 @@
   // combat. These base entries are each weapon's unenchanted numbers.
   var ITEMS = [
     { key: 'sword', name: 'Diamond Sword', type: 'weapon', damage: 7, cooldown: 0.42, knockback: 1.0, mineSpeed: 0.4 },
+    // Mechanically just a sword - same enchant slot, same armor/shield-break/
+    // looting handling (see server.js's baseWeaponKey()) - only the base
+    // damage is higher, a small edge to match its rarer material.
+    { key: 'netherite_sword', name: 'Netherite Sword', type: 'weapon', damage: 8, cooldown: 0.42, knockback: 1.0, mineSpeed: 0.4 },
     { key: 'bow', name: 'Bow', type: 'bow', maxDamage: 10, minDamage: 2, drawTime: 1.0, mineSpeed: 0.3 },
     // ammo here doubles as the max stack size - also what you spawn with.
-    { key: 'pearl', name: 'Ender Pearl', type: 'pearl', ammo: 16, cooldown: 0.9, mineSpeed: 0.3 },
+    { key: 'pearl', name: 'Ender Pearl', type: 'pearl', ammo: 16, cooldown: 1.6, mineSpeed: 0.3 },
     // Absorption is instant on eating; the 4 hearts of real healing trickle
     // in afterward via Regeneration I (8 HP over 8s = 1 HP/s), not a flat
     // instant heal.
@@ -202,6 +206,8 @@
     // the victim is blocking punches straight through their shield (no
     // damage reduction from it) and stuns it for a few seconds.
     { key: 'axe', name: 'Iron Axe', type: 'weapon', damage: 9, cooldown: 0.9, knockback: 1.3, mineSpeed: 0.5 },
+    // Same deal as netherite_sword above - just an axe, slightly harder-hitting.
+    { key: 'netherite_axe', name: 'Netherite Axe', type: 'weapon', damage: 10, cooldown: 0.9, knockback: 1.3, mineSpeed: 0.5 },
     // Weak on a normal swing - its real damage only comes from a "smash
     // attack" (falling and not on the ground when it lands, same rule as a
     // crit): Density V scales that bonus with fall distance, and Wind Burst
@@ -212,7 +218,7 @@
     // of you (minReach), pierces every target in a line instead of just the
     // nearest one, and Lunge III propels the wielder forward horizontally on
     // every landed jab (stronger mid-air) - see COMBAT.SPEAR_* below.
-    { key: 'spear', name: 'Spear (Lunge III, Sharpness V)', type: 'weapon', damage: 7, cooldown: 1.0, knockback: 0.9, mineSpeed: 0.4, reach: 4.5, minReach: 1.2, pierce: true },
+    { key: 'spear', name: 'Spear (Lunge III, Sharpness V)', type: 'weapon', damage: 7, cooldown: 1.6, knockback: 0.9, mineSpeed: 0.4, reach: 4.5, minReach: 1.2, pierce: true },
     // Right-click: launches the thrower upward immediately (vanilla's "wind
     // charge jump") and lobs a slow-falling charge that shoves anyone caught
     // in its blast on impact. If it touches an ender pearl still in flight,
@@ -334,6 +340,13 @@
         'water_bucket', 'lava_bucket', 'tnt', 'tnt_minecart', 'rail', 'flint_steel',
         'powder_snow_bucket', 'totem', 'firework',
         'end_crystal', 'respawn_anchor', 'glowstone']
+      // netherite_sword/netherite_axe are deliberately NOT listed here -
+      // they're a tier swap on top of sword/axe (see swordTier/axeTier,
+      // set at join), not separate items you'd pick alongside them. Only
+      // ever one sword and one axe in a loadout at a time. elytra is ALSO
+      // deliberately not listed here (or in any kit) - it's locked behind
+      // the secret '/elytra257' chat command instead (see
+      // server.js's playerHasItem() and the 'elytraUnlocked' client event).
     }
   };
 
@@ -428,7 +441,17 @@
     none: { key: 'none', name: 'None', value: 0, toughness: 0, protLevel: 0 },
     leather: { key: 'leather', name: 'Leather', value: 7, toughness: 0, protLevel: 0 },
     iron: { key: 'iron', name: 'Iron', value: 15, toughness: 0, protLevel: 2 },
-    diamond: { key: 'diamond', name: 'Diamond', value: ARMOR_VALUE, toughness: ARMOR_TOUGHNESS, protLevel: ARMOR_PROT_LEVEL }
+    diamond: { key: 'diamond', name: 'Diamond', value: ARMOR_VALUE, toughness: ARMOR_TOUGHNESS, protLevel: ARMOR_PROT_LEVEL },
+    // A step above diamond, but deliberately only a SLIGHT one - a little
+    // extra raw defense/toughness plus small resistance fractions
+    // (knockback, fall damage, and blast damage from TNT/firework/crystal/
+    // anchor, each cut by that fraction on top of the normal armor formula
+    // in applyDamage()/trackFall()), not the much bigger jump this had
+    // before.
+    netherite: {
+      key: 'netherite', name: 'Netherite', value: ARMOR_VALUE + 1, toughness: ARMOR_TOUGHNESS + 2, protLevel: ARMOR_PROT_LEVEL,
+      knockbackResist: 0.15, fallResist: 0.2, blastResist: 0.15
+    }
   };
 
   var SHIELD = { key: 'shield', name: 'Shield' };
@@ -465,11 +488,13 @@
 
     // Mace: a landed smash attack (falling + not on ground, same rule as a
     // crit) deals this much plus fall distance (capped) times the Density V
-    // rate, instead of the normal crit multiplier. Tuned so a 15-block fall
-    // one-shots a full diamond/Protection IV target (~81 raw -> ~24.5 after
-    // armor, against 20 max health).
-    MACE_SMASH_BASE: 3,
-    MACE_DENSITY_PER_BLOCK: 5.2,
+    // rate, instead of the normal crit multiplier. Tuned so the one-shot
+    // point against a full diamond/Protection IV target is a genuine
+    // 15-block fall (~68 raw -> ~20.6 after armor, against 20 max health) -
+    // shorter falls scale down from there instead of already being lethal
+    // well before 15 blocks.
+    MACE_SMASH_BASE: 2,
+    MACE_DENSITY_PER_BLOCK: 4.4,
     MACE_MAX_FALL: 24,
     // Wind Burst III: upward velocity given to the wielder right after a
     // smash lands, tuned to this arena's scale (not a literal port of
@@ -480,7 +505,7 @@
     // Spear: Lunge III fires a forward dash on *every* swing now, landed hit
     // or not - it's a mobility tool as much as a weapon, not just a combat
     // reward - stronger mid-air per vanilla's own rule.
-    SPEAR_LUNGE_SPEED: 15,
+    SPEAR_LUNGE_SPEED: 10,
     SPEAR_LUNGE_AIR_MULT: 1.5,
     // Holding the attack button (instead of tapping) charges a stronger
     // thrust: bigger lunge, bonus damage, extended reach - released on
@@ -517,9 +542,9 @@
     RESISTANCE_PCT_PER_LEVEL: 0.20, // extra damage-taken reduction stage, after armor/Protection
     // Thorns III: one flat chance/damage roll per hit taken, rather than
     // vanilla's independent per-armor-piece rolls - simpler, same ballpark.
-    THORNS_PROC_CHANCE: 0.4,
+    THORNS_PROC_CHANCE: 0.3,
     THORNS_DMG_MIN: 2,
-    THORNS_DMG_MAX: 6,
+    THORNS_DMG_MAX: 4,
 
     // Potions are thrown, not drunk - travels like a pearl and splashes on
     // impact (player or world), applying to every alive player within the
@@ -530,9 +555,16 @@
 
     // Enchant toggles (see ENCHANT_DEFS above).
     SHARPNESS_DMG_BONUS: 3, // sword/axe, same scale as Strength's own bonus
-    KNOCKBACK_ENCHANT_ADD: 0.7, // sword Knockback III, added to the hit's knockback multiplier
+    KNOCKBACK_ENCHANT_ADD: 1.1, // sword Knockback III, added to the hit's knockback multiplier
     POWER_DMG_BONUS: 4, // bow Power V, added to arrow damage at any draw
-    PUNCH_ENCHANT_ADD: 0.8, // bow Punch III, added to the arrow's knockback multiplier
+    PUNCH_ENCHANT_ADD: 1.3, // bow Punch III, added to the arrow's knockback multiplier
+    // Bow boosting: shoot a low-charge arrow point-blank and step/jump into
+    // its path once the 0.12s self-hit grace period passes (see
+    // stepProjectiles) - a deliberate mobility trick, so a self-hit gets a
+    // much bigger forward+upward shove than an ordinary arrow hit (0.5 kb
+    // mult / 0.36 kbY) would otherwise give.
+    BOW_BOOST_KB_MULT: 2.2,
+    BOW_BOOST_KB_Y: 0.9,
     LOOTING_KILL_MULT: 2, // sword Looting III: kill-reward ammo restock multiplier
     // Fire Aspect/Flame: sets the target alight for this many seconds,
     // ticking BURN_DPS unarmored damage once per second - a fresh ignite
@@ -562,8 +594,8 @@
 
     // Stick: Knockback II/V dwarf a normal weapon's kbMul (usually ~1-1.8) -
     // added on top of it, not replacing it.
-    STICK_KB2_ADD: 3.2,
-    STICK_KB5_ADD: 9,
+    STICK_KB2_ADD: 4.5,
+    STICK_KB5_ADD: 12,
 
     // Pickaxe Efficiency V: multiplies mineSpeed - purely a client-side
     // pacing number (mining has no server-side timing check), same as every
@@ -647,10 +679,20 @@
     // speed, climbing trades speed for altitude). DRAG slowly bleeds off
     // whatever speed a firework boost isn't actively refilling.
     ELYTRA_MIN_FALL_SPEED: 1.5, // vy must already be falling at least this fast to start gliding
-    ELYTRA_GLIDE_GRAVITY: 4,
-    ELYTRA_MAX_SPEED: 28,
-    ELYTRA_DRAG: 0.995,
-    ELYTRA_PITCH_ACCEL: 26,
+    // Deliberately weaker than a "real" elytra - slower top speed, less
+    // pitch authority (sluggish to steer/climb), more gravity (bleeds
+    // altitude faster) and more drag (loses speed faster without a
+    // firework boost topping it up). ELYTRA_MAX_SPEED is the plain-glide
+    // ceiling; a firework boost raises it to ELYTRA_BOOST_MAX_SPEED for
+    // ELYTRA_BOOST_WINDOW seconds (see input.boosted in physics.js) instead
+    // of immediately getting clamped back down to the same slow cap -
+    // fireworks are the actual reason to fly fast, not gliding alone.
+    ELYTRA_GLIDE_GRAVITY: 7,
+    ELYTRA_MAX_SPEED: 14,
+    ELYTRA_BOOST_MAX_SPEED: 30,
+    ELYTRA_BOOST_WINDOW: 2.2,
+    ELYTRA_DRAG: 0.985,
+    ELYTRA_PITCH_ACCEL: 16,
 
     // Firework Rocket: a forward speed burst while gliding, or a thrown
     // explosive otherwise - smaller/faster than TNT, more like a beefed-up
@@ -667,7 +709,7 @@
     // or above the crystal's own height, barely a scratch if they're below
     // it (real vanilla's exposure-based falloff, simplified to a flat
     // height check rather than true line-of-sight raycasting).
-    CRYSTAL_BLAST_RADIUS: 6,
+    CRYSTAL_BLAST_RADIUS: 4,
     CRYSTAL_BLAST_DMG_MAX: 46,
     CRYSTAL_BLAST_DMG_BELOW: 2,
     CRYSTAL_BLAST_KB: 2.4,
@@ -675,11 +717,24 @@
 
     // Respawn Anchor: charges 1 at a time with glowstone, reaching 4
     // detonates it on the spot - bigger than TNT or an end crystal, same
-    // "obviously the strongest bomb" role it has in vanilla.
+    // "obviously the strongest bomb" role it has in vanilla. A sword hit
+    // against one holding at least 1 charge detonates it early too (see the
+    // 'hitAnchor' handler) - a shorter fuse for less damage, encouraging
+    // actually finishing the full 4-charge bomb instead.
     ANCHOR_MAX_CHARGES: 4,
-    ANCHOR_BLAST_RADIUS: 8,
+    ANCHOR_BLAST_RADIUS: 5,
     ANCHOR_BLAST_DMG: 60,
-    ANCHOR_BLAST_KB: 3.2
+    ANCHOR_BLAST_KB: 3.2,
+    ANCHOR_SWORD_HIT_REACH: 5,
+
+    // Lightning: a real area strike now, not just a visual - anyone caught
+    // in LIGHTNING_STRIKE_RADIUS takes a jolt of damage (bypasses armor,
+    // same as fire/lava/fall - it's an environmental hazard, not a combat
+    // hit) and catches fire, and a couple of nearby ground tiles catch too.
+    // Triggered by weather's random strikes, a Channeling trident hit, and
+    // (cosmetically only, no damage) wherever a player/bot just died.
+    LIGHTNING_STRIKE_RADIUS: 4.5,
+    LIGHTNING_STRIKE_DMG: 5
   };
 
   var PHYS = {
