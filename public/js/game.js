@@ -576,7 +576,16 @@
       });
       net.on('snapshot', s => this._applySnapshot(s));
       net.on('disconnected', reason => {
-        this._log('Disconnected: ' + reason, true);
+        // This only ever fires for an unexpected drop (a deliberate leave-
+        // to-menu goes through Net.disconnect(), which strips this listener
+        // first) - almost always the server restarting for an update, e.g.
+        // a Render redeploy. Socket.io would otherwise quietly auto-
+        // reconnect the existing tab and keep running its old in-memory JS
+        // against the new server, which is exactly what looks like "the
+        // update didn't reach everyone" - reload instead so the tab re-
+        // fetches whatever new code just shipped.
+        this._log('Disconnected: ' + reason + ' - reloading...', true);
+        setTimeout(() => location.reload(), 1200);
       });
     }
 
