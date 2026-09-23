@@ -532,14 +532,9 @@
   // this is drawn as its own inflated box shell over the body (see
   // MCEntities.armorParts / Renderer.drawArmorLayer), not a tint on the
   // skin, so it reads as "wearing plates" rather than "recolored".
-  // wolf_fur/dog_armor aren't armor tiers at all, but they're drawn the
-  // exact same way (a flat material color box shell - see
-  // MCEntities.wolfParts/Renderer.drawWolf) so they just ride this same
-  // palette + createArmorTexture()/getArmorTexture() cache instead of
-  // needing a separate texture system.
-  const ARMOR_COLORS = { leather: '#8a5a2e', iron: '#d3d5d8', diamond: '#3fd0c9', netherite: '#17161a', wolf_fur: '#8a7a68', dog_armor: '#5a6a72' };
-  const ARMOR_FLECKS = { leather: '#c9915a', iron: '#ffffff', diamond: '#c8fff9', netherite: '#6a5a52', wolf_fur: '#c9c0a8', dog_armor: '#8a9aa2' };
-  function paintArmor(tier, trim) {
+  const ARMOR_COLORS = { leather: '#8a5a2e', iron: '#d3d5d8', diamond: '#3fd0c9', netherite: '#17161a' };
+  const ARMOR_FLECKS = { leather: '#c9915a', iron: '#ffffff', diamond: '#c8fff9', netherite: '#6a5a52' };
+  function paintArmor(tier, pieceKey, grid) {
     const cv = document.createElement('canvas');
     cv.width = cv.height = 64;
     const g = cv.getContext('2d');
@@ -563,26 +558,116 @@
       g.fillRect((flecks() * 64) | 0, (flecks() * 64) | 0, 1, 1);
     }
     // A player-painted trim (see game.js's customize-trims editor) is
-    // stamped on top of the tier's own noise/flecks - it tiles across every
-    // armor piece the same way the base swatch already does (this is one
-    // shared flat texture, not a real per-piece UV unwrap), and index 0
-    // ("no paint") leaves the base tier texture showing through untouched.
-    if (MC.isValidTrim(trim)) {
-      const cell = 64 / MC.TRIM_GRID;
-      for (let ty = 0; ty < MC.TRIM_GRID; ty++) {
-        for (let tx = 0; tx < MC.TRIM_GRID; tx++) {
-          const idx = trim[ty * MC.TRIM_GRID + tx];
-          if (!idx) continue;
-          g.fillStyle = TRIM_PALETTE[idx];
-          g.fillRect(tx * cell, ty * cell, cell, cell);
-        }
-      }
+    // stamped on top of the tier's own noise/flecks, once per face of the
+    // piece being painted - so a design wraps identically around all six
+    // sides rather than being sliced up by the atlas layout. Index 0 ("no
+    // paint") leaves the base tier texture showing through untouched, which
+    // is also what makes the base visible underneath in the editor.
+    if (pieceKey && MC.isValidTrim(grid)) {
+      for (const rect of pieceFaceRects(pieceKey)) stampTrim(g, grid, rect);
     }
     return cv;
   }
 
-  function createArmorTexture(gl, tier, trim) {
-    const cv = paintArmor(tier, trim);
+  /** Every atlas face rect [u,v,w,h] belonging to one armor piece. Boots and
+   * leggings deliberately share the same rects - they get separate textures
+   * (see Renderer.getPieceArmorTexture), so the overlap never collides. */
+  const PIECE_PARTS = {
+    helmet: ['head'],
+    chest: ['body', 'armR', 'armL'],
+    legs: ['legR', 'legL'],
+    boots: ['legR', 'legL']
+  };
+  const FACE_ORDER = ['front', 'back', 'left', 'right', 'top', 'bottom'];
+  function pieceFaceRects(pieceKey) {
+    const out = [];
+    for (const part of (PIECE_PARTS[pieceKey] || [])) {
+      const uv = SKIN_PARTS[part];
+      for (const f of FACE_ORDER) out.push(uv[f]);
+    }
+    return out;
+  }
+
+  /** Paints a trim grid to fill one atlas face rect, skipping "no paint". */
+  function stampTrim(g, grid, rect) {
+    const [ru, rv, rw, rh] = rect;
+    const cw = rw / MC.TRIM_GRID, ch = rh / MC.TRIM_GRID;
+    for (let ty = 0; ty < MC.TRIM_GRID; ty++) {
+      for (let tx = 0; tx < MC.TRIM_GRID; tx++) {
+        const idx = grid[ty * MC.TRIM_GRID + tx];
+        if (!idx) continue;
+        g.fillStyle = TRIM_PALETTE[idx];
+        // Overdraw by a hair: adjacent cells at fractional sizes otherwise
+        // leave hairline seams of base texture between them.
+        g.fillRect(ru + tx * cw, rv + ty * ch, cw + 0.5, ch + 0.5);
+      }
+    }
+  }
+
+  /**
+   * Wolf pelt: pale grey-white fur with a real face painted into the head's
+   * front atlas face (eyes, brows, snout, nose) instead of the flat
+   * featureless colour block wolves used to render as. An armored wolf keeps
+   * the same fur and face and gets a steel vest over the body/tail region
+   * only, rather than the whole animal turning a solid armor colour.
+   */
+  function paintWolf(armored) {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const g = cv.getContext('2d');
+    g.imageSmoothingEnabled = false;
+
+    const rnd = rng(hashStr('wolf_fur') || 97);
+    const img = g.createImageData(64, 64);
+    const [fr, fg, fb] = hex('#e3e1dc'); // pale wolf grey-white
+    for (let i = 0; i < img.data.length; i += 4) {
+      const n = (rnd() - 0.5) * 26;
+      img.data[i] = clamp255(fr + n);
+      img.data[i + 1] = clamp255(fg + n);
+      img.data[i + 2] = clamp255(fb + n);
+      img.data[i + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+
+    // Darker grey guard hairs, so the pelt reads as fur not paint.
+    const flecks = rng(1337);
+    g.fillStyle = '#b4b1aa';
+    for (let i = 0; i < 220; i++) {
+      if (flecks() > 0.35) continue;
+      g.fillRect((flecks() * 64) | 0, (flecks() * 64) | 0, 1, 1);
+    }
+
+    if (armored) {
+      // Steel vest across the torso only - the body part's own atlas faces.
+      for (const f of FACE_ORDER) {
+        const [u, v, w, h] = SKIN_PARTS.body[f];
+        g.fillStyle = '#6b7a84';
+        g.fillRect(u, v, w, h);
+        g.fillStyle = '#93a3ad';
+        g.fillRect(u, v, w, Math.max(1, h * 0.18));
+      }
+    }
+
+    // Face, painted into the head's front face rect (the wolf looks -Z).
+    const [hu, hv, hw, hh] = SKIN_PARTS.head.front;
+    const px = hw / 8, py = hh / 8; // the rect is an 8x8 "skin pixel" face
+    const fill = (x, y, w, h, c) => { g.fillStyle = c; g.fillRect(hu + x * px, hv + y * py, w * px, h * py); };
+    fill(1, 2, 2, 2, '#2b2b2f');       // left eye
+    fill(5, 2, 2, 2, '#2b2b2f');       // right eye
+    fill(1.5, 2.4, 0.8, 0.8, '#d9d7d2'); // eye glints
+    fill(5.5, 2.4, 0.8, 0.8, '#d9d7d2');
+    fill(0.8, 1.4, 2.4, 0.6, '#a9a69f'); // brows
+    fill(4.8, 1.4, 2.4, 0.6, '#a9a69f');
+    fill(2.6, 4.4, 2.8, 2.2, '#cfccc5'); // snout
+    fill(3.2, 4.8, 1.6, 1.2, '#26262a'); // nose
+    return cv;
+  }
+
+  function createWolfTexture(gl, armored) {
+    return uploadNearest(gl, paintWolf(armored));
+  }
+
+  function uploadNearest(gl, cv) {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
@@ -591,6 +676,10 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     return tex;
+  }
+
+  function createArmorTexture(gl, tier, pieceKey, grid) {
+    return uploadNearest(gl, paintArmor(tier, pieceKey, grid));
   }
 
   /** Name plate rendered to a texture. Returns {tex, w, h, aspect}. */
@@ -1131,8 +1220,23 @@
         g.fill();
       }
     }
+    // A player-painted trim, roughly applied to the finished icon so the
+    // hotbar/inventory preview matches what the real piece looks like.
+    // 'source-atop' clips the paint to whatever the icon just drew, so it
+    // lands on the item's silhouette rather than the empty background, and
+    // the slight transparency keeps the icon's own shading readable through
+    // it. The shield isn't listed here - it paints its own trim further up,
+    // properly clipped to its outline.
+    if (TRIMMABLE_ICONS[key] && MC.isValidTrim(trim)) {
+      g.save();
+      g.globalCompositeOperation = 'source-atop';
+      g.globalAlpha = 0.85;
+      stampTrim(g, trim, [0, 0, S, S]);
+      g.restore();
+    }
     return cv;
   }
+  const TRIMMABLE_ICONS = { helmet: 1, chestplate: 1, leggings: 1, boots: 1, elytra: 1 };
 
   // Classic blocky pixel-art heart, matching the game's chunky icon style.
   // fill: 0..1, continuous (drains column by column) rather than snapping to
@@ -1213,7 +1317,9 @@
 
   global.MCTextures = {
     TILE, buildTiles, createBlockTexture, createSkinTexture, createLabelTexture, createArmorTexture,
+    createWolfTexture, paintWolf,
     blockIcon, itemIcon, heartIcon, flameIcon, paintSkin, paintArmor, SKIN_PARTS, boxUV, hashStr, POTION_COLORS,
+    pieceFaceRects, PIECE_PARTS, FACE_ORDER, stampTrim,
     SHIELD_ICON_SIZE: 128
   };
 })(window);

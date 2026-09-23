@@ -43,7 +43,8 @@
         enchantList: el('enchantList'),
         effectsBar: el('effectsBar'),
         trimsBtn: el('trimsBtn'), trimEditor: el('trimEditor'), trimCanvas: el('trimCanvas'),
-        trimTabArmor: el('trimTabArmor'), trimTabShield: el('trimTabShield'), trimPalette: el('trimPalette'),
+        trimTabs: el('trimTabs'), trimPalette: el('trimPalette'), trimHint: el('trimHint'),
+        trimRotateRow: el('trimRotateRow'), trimRotL: el('trimRotL'), trimRotR: el('trimRotR'),
         trimBrushRow: el('trimBrushRow'), trimClearBtn: el('trimClearBtn'), trimExportBtn: el('trimExportBtn'),
         trimImportBtn: el('trimImportBtn'), trimImportInput: el('trimImportInput'), trimCloseBtn: el('trimCloseBtn')
       };
@@ -183,53 +184,270 @@
       return out;
     }
 
+    /** The painted grid that belongs to an icon, if any - maps an item
+     * icon key onto its trim slot so the hotbar/inventory previews match
+     * the real piece (see itemIcon's TRIMMABLE_ICONS). */
+    _trimFor(iconKey) {
+      const slot = { helmet: 'helmet', chestplate: 'chest', leggings: 'legs', boots: 'boots', elytra: 'elytra', shield: 'shield' }[iconKey];
+      return (slot && this.myTrims) ? this.myTrims[slot] : null;
+    }
+
     /**
-     * The pixel-art armor/shield trim editor, opened from the main menu.
-     * Fully self-contained: two 16x16 color-index grids (armor/shield),
-     * auto-saved to localStorage on every stroke (see loadTrim/saveTrim) so
-     * a returning player's trim just applies without re-importing anything,
-     * plus an explicit export/import round-trip through a downloaded .json
-     * file for moving a trim to another browser or device.
+     * The trim editor, opened from the main menu. One 16x16 colour-index
+     * grid per slot (each armor piece, plus elytra and shield), auto-saved
+     * to localStorage on every stroke so a returning player's designs just
+     * apply without re-importing anything, plus an export/import round-trip
+     * through a downloaded .json file for moving them to another device.
+     *
+     * Armor pieces are painted directly on a rotatable 3D view of that
+     * piece - clicking a face solves back to the grid cell under the cursor
+     * - while elytra and shield are painted flat over their real item icon.
+     * Either way the piece's own base texture shows through wherever a cell
+     * is left unpainted, so it's always clear what's being coloured.
      */
     _wireTrimEditor() {
       const hud = this.hud;
       if (!hud.trimsBtn) return;
-      const GRID = MC.TRIM_GRID;
-      const CELL = hud.trimCanvas.width / GRID; // 320/16 = 20px/cell
-      const ctx = hud.trimCanvas.getContext('2d');
-      this._trimGrids = { armor: null, shield: null };
-      this._trimTarget = 'armor';
-      this._trimColor = 1; // index into MC.TRIM_PALETTE - starts on the first real color
+      const G = MC.TRIM_GRID;
+      const TX = global.MCTextures;
+      const ME = global.MCEntities;
+      const cv = hud.trimCanvas;
+      const ctx = cv.getContext('2d');
+      const PIECE_BONES = { helmet: ['head'], chest: ['body', 'armR', 'armL'], legs: ['legR', 'legL'], boots: ['bootR', 'bootL'] };
+      const ICON_FOR = { elytra: 'elytra', shield: 'shield' };
+
+      this._trims = loadTrims() || {};
+      this._trimSlot = 'helmet';
+      this._trimColor = 1;
       this._trimBrush = 1;
+      let yaw = 0.7, pitch = -0.35; // a slight look-down, like a display stand
 
       const blank = () => new Array(MC.TRIM_CELLS).fill(0);
-      const keyFor = target => target === 'shield' ? 'mcpvp_shieldTrim' : 'mcpvp_armorTrim';
-      const gridFor = target => this._trimGrids[target] || (this._trimGrids[target] = loadTrim(keyFor(target)) || blank());
+      const gridFor = slot => this._trims[slot] || (this._trims[slot] = blank());
+      const tier = () => (hud.netheriteArmorCheck && hud.netheriteArmorCheck.checked) ? 'netherite' : 'diamond';
+      const is3D = slot => !!PIECE_BONES[slot];
+
+      // ---- the piece's own base texture, sampled per cell so unpainted
+      // cells show exactly what that part really looks like in game.
+      let base = { key: null, data: null, w: 0 };
+      const baseData = () => {
+        const key = this._trimSlot + ':' + tier();
+        if (base.key !== key) {
+          const c = is3D(this._trimSlot) ? TX.paintArmor(tier()) : TX.itemIcon(ICON_FOR[this._trimSlot], 64);
+          base = { key, data: c.getContext('2d').getImageData(0, 0, c.width, c.height), w: c.width };
+        }
+        return base;
+      };
+      // Palette hex parsed once each - the 3D view recolours a few thousand
+      // cells per redraw and can't afford to re-parse a string per cell.
+      const paletteCache = MC.TRIM_PALETTE.map(h => h ? [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)] : null);
+      const paletteRGB = i => paletteCache[i] || [255, 255, 255];
+      const basePixel = (px, py) => {
+        const b = baseData();
+        const x = Math.max(0, Math.min(b.w - 1, px | 0)), y = Math.max(0, Math.min(b.w - 1, py | 0));
+        const i = (y * b.w + x) * 4;
+        return [b.data.data[i], b.data.data[i + 1], b.data.data[i + 2], b.data.data[i + 3]];
+      };
+
+      // ---- geometry: flatten a piece's boxes into faces carrying their
+      // four model-space corners and the atlas rect they sample.
+      const armorGeo = ME.armorParts();
+      const faceCache = {};
+      function facesFor(slot) {
+        if (faceCache[slot]) return faceCache[slot];
+        const faces = [];
+        for (const bone of PIECE_BONES[slot]) {
+          const part = armorGeo[bone], v = part.geo.vertices, pv = part.pivot;
+          for (let f = 0; f < v.length / 24; f++) {
+            const c = [];
+            for (let k = 0; k < 4; k++) {
+              const o = (f * 4 + k) * 6;
+              c.push({ p: [v[o] + pv[0], v[o + 1] + pv[1], v[o + 2] + pv[2]], u: v[o + 3], v: v[o + 4] });
+            }
+            // box() emits corners as (u0,v0) (u0,v1) (u1,v0) (u1,v1), so
+            // corner 0 is the rect origin and 3 is the far corner.
+            faces.push({
+              c, light: v[f * 24 + 5],
+              rect: [c[0].u * 64, c[0].v * 64, (c[3].u - c[0].u) * 64, (c[3].v - c[0].v) * 64]
+            });
+          }
+        }
+        // Centre and scale the assembled piece so it fills the view.
+        let lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+        for (const f of faces) for (const k of f.c) for (let i = 0; i < 3; i++) {
+          lo[i] = Math.min(lo[i], k.p[i]); hi[i] = Math.max(hi[i], k.p[i]);
+        }
+        const mid = [0, 1, 2].map(i => (lo[i] + hi[i]) / 2);
+        const span = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1;
+        for (const f of faces) for (const k of f.c) for (let i = 0; i < 3; i++) k.p[i] -= mid[i];
+        faceCache[slot] = { faces, scale: (cv.width * 0.62) / span };
+        return faceCache[slot];
+      }
+
+      const project = (p, scale) => {
+        const cy = Math.cos(yaw), sy = Math.sin(yaw);
+        const x1 = p[0] * cy - p[2] * sy, z1 = p[0] * sy + p[2] * cy;
+        const cp = Math.cos(pitch), sp = Math.sin(pitch);
+        const y1 = p[1] * cp - z1 * sp, z2 = p[1] * sp + z1 * cp;
+        return [cv.width / 2 + x1 * scale, cv.height / 2 - y1 * scale, z2];
+      };
+
+      /** Faces projected to screen space, furthest first so painting them
+       * in order hides whatever is behind (a plain painter's sort - the
+       * boxes never interpenetrate, so per-pixel depth isn't needed). */
+      function projected(slot) {
+        const { faces, scale } = facesFor(slot);
+        const out = faces.map(f => {
+          const s = f.c.map(k => project(k.p, scale));
+          return { f, sA: s[0], sB: s[1], sC: s[2], depth: (s[0][2] + s[1][2] + s[2][2] + s[3][2]) / 4 };
+        });
+        out.sort((a, b) => b.depth - a.depth);
+        return out;
+      }
 
       const draw = () => {
-        const grid = gridFor(this._trimTarget);
-        ctx.clearRect(0, 0, hud.trimCanvas.width, hud.trimCanvas.height);
-        for (let ty = 0; ty < GRID; ty++) {
-          for (let tx = 0; tx < GRID; tx++) {
-            const idx = grid[ty * GRID + tx];
-            // A faint checkerboard for "no paint" cells - same idea as any
-            // image editor's transparency grid, so an empty cell reads as
-            // "nothing painted here" rather than looking like solid black.
-            ctx.fillStyle = idx ? MC.TRIM_PALETTE[idx] : ((tx + ty) % 2 ? '#3a3a3a' : '#333');
-            ctx.fillRect(tx * CELL, ty * CELL, CELL, CELL);
+        const slot = this._trimSlot, grid = gridFor(slot);
+        ctx.clearRect(0, 0, cv.width, cv.height);
+        ctx.fillStyle = '#26272b';
+        ctx.fillRect(0, 0, cv.width, cv.height);
+        if (is3D(slot)) {
+          for (const pf of projected(slot)) {
+            const { f, sA, sB, sC } = pf;
+            const [ru, rv, rw, rh] = f.rect;
+            for (let ty = 0; ty < G; ty++) {
+              for (let tx = 0; tx < G; tx++) {
+                const idx = grid[ty * G + tx];
+                const px = idx ? paletteRGB(idx) : basePixel(ru + (tx + 0.5) * rw / G, rv + (ty + 0.5) * rh / G);
+                // Shaded by the face's own baked light so the preview reads
+                // as a solid 3D object rather than a flat silhouette. Done
+                // by hand rather than with ctx.filter, which would force a
+                // re-rasterise on every one of the ~1500 cells per frame.
+                const L = f.light;
+                ctx.fillStyle = 'rgb(' + (px[0] * L | 0) + ',' + (px[1] * L | 0) + ',' + (px[2] * L | 0) + ')';
+                const s0 = tx / G, s1 = (tx + 1) / G, t0 = ty / G, t1 = (ty + 1) / G;
+                const at = (s, t) => [
+                  sA[0] + s * (sC[0] - sA[0]) + t * (sB[0] - sA[0]),
+                  sA[1] + s * (sC[1] - sA[1]) + t * (sB[1] - sA[1])
+                ];
+                const q0 = at(s0, t0), q1 = at(s1, t0), q2 = at(s1, t1), q3 = at(s0, t1);
+                ctx.beginPath();
+                ctx.moveTo(q0[0], q0[1]); ctx.lineTo(q1[0], q1[1]);
+                ctx.lineTo(q2[0], q2[1]); ctx.lineTo(q3[0], q3[1]);
+                ctx.closePath();
+                ctx.fill();
+              }
+            }
+          }
+        } else {
+          // Flat items: the real icon at full size, painted over directly.
+          const icon = TX.itemIcon(ICON_FOR[slot], cv.width, tier());
+          ctx.drawImage(icon, 0, 0);
+          const cell = cv.width / G;
+          ctx.globalAlpha = 0.85;
+          for (let ty = 0; ty < G; ty++) {
+            for (let tx = 0; tx < G; tx++) {
+              const idx = grid[ty * G + tx];
+              if (!idx) continue;
+              ctx.fillStyle = MC.TRIM_PALETTE[idx];
+              ctx.fillRect(tx * cell, ty * cell, cell + 0.5, cell + 0.5);
+            }
+          }
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+          ctx.lineWidth = 1;
+          for (let i = 1; i < G; i++) {
+            ctx.beginPath(); ctx.moveTo(i * cell, 0); ctx.lineTo(i * cell, cv.height); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, i * cell); ctx.lineTo(cv.width, i * cell); ctx.stroke();
           }
         }
       };
+      this._redrawTrim = draw;
 
-      // Palette swatches, built straight from MC.TRIM_PALETTE (index 0 gets
-      // its own "eraser" swatch instead of a color chip).
+      /** Which grid cell the cursor is over: a direct lookup for flat
+       * items, or for a 3D piece the nearest face whose screen-space
+       * parallelogram contains the point, solved back to (s,t). */
+      const cellAt = (mx, my) => {
+        const slot = this._trimSlot;
+        if (!is3D(slot)) {
+          const cell = cv.width / G;
+          const tx = Math.floor(mx / cell), ty = Math.floor(my / cell);
+          return (tx < 0 || ty < 0 || tx >= G || ty >= G) ? null : { tx, ty };
+        }
+        let best = null;
+        for (const { f, sA, sB, sC, depth } of projected(slot)) {
+          const ux = sC[0] - sA[0], uy = sC[1] - sA[1];
+          const vx = sB[0] - sA[0], vy = sB[1] - sA[1];
+          const det = ux * vy - uy * vx;
+          if (Math.abs(det) < 1e-6) continue;
+          const px = mx - sA[0], py = my - sA[1];
+          const s = (px * vy - py * vx) / det;
+          const t = (ux * py - uy * px) / det;
+          if (s < 0 || s > 1 || t < 0 || t > 1) continue;
+          if (!best || depth < best.depth) {
+            best = { depth, tx: Math.min(G - 1, Math.floor(s * G)), ty: Math.min(G - 1, Math.floor(t * G)) };
+          }
+        }
+        return best;
+      };
+
+      const paintCell = hit => {
+        if (!hit) return;
+        const grid = gridFor(this._trimSlot);
+        const half = (this._trimBrush - 1) / 2;
+        const x0 = Math.round(hit.tx - half), y0 = Math.round(hit.ty - half);
+        for (let dy = 0; dy < this._trimBrush; dy++) {
+          for (let dx = 0; dx < this._trimBrush; dx++) {
+            const x = x0 + dx, y = y0 + dy;
+            if (x < 0 || y < 0 || x >= G || y >= G) continue;
+            grid[y * G + x] = this._trimColor;
+          }
+        }
+        draw();
+      };
+
+      const localPoint = e => {
+        const r = cv.getBoundingClientRect();
+        return [(e.clientX - r.left) / r.width * cv.width, (e.clientY - r.top) / r.height * cv.height];
+      };
+
+      let painting = false, rotating = false, lastX = 0, lastY = 0;
+      cv.addEventListener('contextmenu', e => e.preventDefault());
+      cv.addEventListener('mousedown', e => {
+        if (e.button === 2 || e.shiftKey) {
+          // Right-drag (or shift-drag) spins the piece instead of painting.
+          rotating = true; lastX = e.clientX; lastY = e.clientY;
+          e.preventDefault();
+          return;
+        }
+        painting = true;
+        paintCell(cellAt(...localPoint(e)));
+      });
+      cv.addEventListener('mousemove', e => {
+        if (rotating) {
+          yaw += (e.clientX - lastX) * 0.012;
+          pitch = clamp(pitch + (e.clientY - lastY) * 0.012, -1.2, 1.2);
+          lastX = e.clientX; lastY = e.clientY;
+          draw();
+        } else if (painting) {
+          paintCell(cellAt(...localPoint(e)));
+        }
+      });
+      window.addEventListener('mouseup', () => {
+        if (!painting && !rotating) return;
+        // Saved on stroke release rather than on Play, so closing the panel
+        // or switching slots never loses whatever was just painted.
+        if (painting) saveTrims(this._trims);
+        painting = false; rotating = false;
+      });
+
+      // ---- palette / brush / slot controls
       hud.trimPalette.innerHTML = '';
       for (let i = 0; i < MC.TRIM_PALETTE.length; i++) {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'trimSwatch' + (i === 0 ? ' eraser' : '') + (i === this._trimColor ? ' active' : '');
         if (i > 0) btn.style.background = MC.TRIM_PALETTE[i];
-        btn.title = i === 0 ? 'Eraser' : 'Color ' + i;
+        btn.title = i === 0 ? 'Eraser (shows the original texture)' : 'Colour ' + i;
         btn.addEventListener('click', () => {
           this._trimColor = i;
           hud.trimPalette.querySelectorAll('.trimSwatch').forEach(s => s.classList.remove('active'));
@@ -237,7 +455,6 @@
         });
         hud.trimPalette.appendChild(btn);
       }
-
       hud.trimBrushRow.querySelectorAll('.brushBtn').forEach(btn => {
         btn.addEventListener('click', () => {
           this._trimBrush = parseInt(btn.dataset.size, 10) || 1;
@@ -246,60 +463,31 @@
         });
       });
 
-      const setTarget = target => {
-        this._trimTarget = target;
-        hud.trimTabArmor.classList.toggle('active', target === 'armor');
-        hud.trimTabShield.classList.toggle('active', target === 'shield');
+      const setSlot = slot => {
+        this._trimSlot = slot;
+        hud.trimTabs.querySelectorAll('.trimTab').forEach(b => b.classList.toggle('active', b.dataset.slot === slot));
+        hud.trimRotateRow.classList.toggle('hidden', !is3D(slot));
+        hud.trimHint.textContent = is3D(slot)
+          ? 'Click the model to paint. Right-drag (or shift-drag) to turn it.'
+          : 'Click to paint straight onto the item.';
         draw();
       };
-      hud.trimTabArmor.addEventListener('click', () => setTarget('armor'));
-      hud.trimTabShield.addEventListener('click', () => setTarget('shield'));
-
-      // Paints a brush-sized square of cells centered on (cx,cy), clipped to
-      // the grid edges - "diameter N" meaning an NxN block of cells, same
-      // brush-size request as the palette above.
-      const paintAt = (cx, cy) => {
-        const grid = gridFor(this._trimTarget);
-        const half = (this._trimBrush - 1) / 2;
-        const x0 = Math.round(cx - half), y0 = Math.round(cy - half);
-        for (let dy = 0; dy < this._trimBrush; dy++) {
-          for (let dx = 0; dx < this._trimBrush; dx++) {
-            const x = x0 + dx, y = y0 + dy;
-            if (x < 0 || y < 0 || x >= GRID || y >= GRID) continue;
-            grid[y * GRID + x] = this._trimColor;
-          }
-        }
-        draw();
-      };
-      let painting = false;
-      const cellFromEvent = e => {
-        const rect = hud.trimCanvas.getBoundingClientRect();
-        const px = (e.clientX - rect.left) / rect.width * hud.trimCanvas.width;
-        const py = (e.clientY - rect.top) / rect.height * hud.trimCanvas.height;
-        return [Math.floor(px / CELL), Math.floor(py / CELL)];
-      };
-      hud.trimCanvas.addEventListener('mousedown', e => { painting = true; paintAt(...cellFromEvent(e)); });
-      hud.trimCanvas.addEventListener('mousemove', e => { if (painting) paintAt(...cellFromEvent(e)); });
-      window.addEventListener('mouseup', () => {
-        if (!painting) return;
-        painting = false;
-        // Auto-save on stroke release, not on the menu's Play click - this
-        // is a standalone editor, so closing/switching tabs never loses
-        // whatever was just painted.
-        saveTrim(keyFor(this._trimTarget), this._trimGrids[this._trimTarget]);
+      hud.trimTabs.querySelectorAll('.trimTab').forEach(btn => {
+        btn.addEventListener('click', () => setSlot(btn.dataset.slot));
       });
+      hud.trimRotL.addEventListener('click', () => { yaw -= 0.4; draw(); });
+      hud.trimRotR.addEventListener('click', () => { yaw += 0.4; draw(); });
 
       hud.trimClearBtn.addEventListener('click', () => {
-        this._trimGrids[this._trimTarget] = blank();
-        saveTrim(keyFor(this._trimTarget), this._trimGrids[this._trimTarget]);
+        this._trims[this._trimSlot] = blank();
+        saveTrims(this._trims);
         draw();
       });
 
       hud.trimExportBtn.addEventListener('click', () => {
-        // Bundles both grids into one file regardless of which tab is open -
-        // a single download that's a complete backup of everything painted.
-        const payload = { armorTrim: gridFor('armor'), shieldTrim: gridFor('shield') };
-        const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+        // Every slot in one file, whichever tab happens to be open - a
+        // single download that backs up the whole set.
+        const blob = new Blob([JSON.stringify(this._trims)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url; a.download = 'mc-pvp-trims.json';
@@ -316,17 +504,27 @@
         reader.onload = () => {
           try {
             const data = JSON.parse(reader.result);
-            let imported = 0;
-            if (MC.isValidTrim(data.armorTrim)) { this._trimGrids.armor = data.armorTrim; saveTrim(keyFor('armor'), data.armorTrim); imported++; }
-            if (MC.isValidTrim(data.shieldTrim)) { this._trimGrids.shield = data.shieldTrim; saveTrim(keyFor('shield'), data.shieldTrim); imported++; }
-            if (!imported) { alert('That file has no valid armor/shield trim in it.'); return; }
+            // Also accepts the older two-grid export, mapping its single
+            // armor pattern onto every piece.
+            const legacy = MC.isValidTrim(data.armorTrim) || MC.isValidTrim(data.shieldTrim);
+            const incoming = legacy
+              ? { helmet: data.armorTrim, chest: data.armorTrim, legs: data.armorTrim, boots: data.armorTrim, shield: data.shieldTrim }
+              : data;
+            const clean = MC.sanitizeTrims(incoming);
+            if (!clean) { alert('That file has no valid trims in it.'); return; }
+            this._trims = clean;
+            saveTrims(this._trims);
             draw();
           } catch (e) { alert('Could not read that file as a trim export.'); }
         };
         reader.readAsText(file);
       });
 
-      hud.trimsBtn.addEventListener('click', () => { setTarget('armor'); hud.trimEditor.classList.remove('hidden'); });
+      hud.trimsBtn.addEventListener('click', () => {
+        base.key = null; // tier may have changed via the netherite checkbox
+        hud.trimEditor.classList.remove('hidden');
+        setSlot(this._trimSlot);
+      });
       hud.trimCloseBtn.addEventListener('click', () => hud.trimEditor.classList.add('hidden'));
     }
 
@@ -415,13 +613,12 @@
       // Trims are edited from their own panel (see _wireTrimEditor), not
       // this menu form - they're read straight from localStorage here so
       // whatever was last saved just applies, no re-import needed each
-      // session (see loadTrim()).
-      const armorTrim = loadTrim('mcpvp_armorTrim');
-      const shieldTrim = loadTrim('mcpvp_shieldTrim');
+      // session (see loadTrims()).
+      const trims = loadTrims();
       this.hud.menu.classList.add('hidden');
       this.hud.loading.classList.remove('hidden');
       global.MCSound.resume();
-      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, armorTrim, shieldTrim).catch(err => {
+      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims).catch(err => {
         console.error(err);
         this.hud.loading.classList.add('hidden');
         this.hud.menu.classList.remove('hidden');
@@ -429,24 +626,23 @@
       });
     }
 
-    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, armorTrim, shieldTrim) {
+    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims) {
       // Drives the armor-piece icon color in the inventory (see
       // _buildInventoryUI/_renderChestSlot) - the human player's own tier
       // isn't part of `this.me` (only remote players carry .armor, from
       // publicPlayer()), so it's tracked here instead.
       this.armorTier = armor === 'netherite' ? 'netherite' : 'diamond';
-      // Same idea as armorTier above - our own trim isn't part of `this.me`
-      // either, so it's tracked here for the third-person self-render and
-      // the shield viewmodel (see render()/_drawViewmodel()).
-      this.myArmorTrim = MC.isValidTrim(armorTrim) ? armorTrim : null;
-      this.myShieldTrim = MC.isValidTrim(shieldTrim) ? shieldTrim : null;
+      // Same idea as armorTier above - our own trims aren't part of
+      // `this.me` either, so they're tracked here for the third-person
+      // self-render and the shield viewmodel (see render()/_drawViewmodel()).
+      this.myTrims = MC.sanitizeTrims(trims);
       this._initInventorySlots(kit, customItems, swordTier, axeTier);
       // Kept purely for client-side-only cosmetics/pacing that don't need a
       // server round-trip (currently just the pickaxe's Efficiency V mining
       // speed) - combat-relevant enchants are already re-validated server-side
       // regardless of what this holds.
       this.myEnchants = enchantOpts || MC.defaultEnchantOpts();
-      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, this.myArmorTrim, this.myShieldTrim);
+      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, this.myTrims);
       this.world = new global.MCWorld(init.seed);
       this.world.applyEdits(init.edits || []);
       // The WebGL context (and everything already uploaded into it - block
@@ -774,7 +970,7 @@
           // playerJoin), never on a bare per-tick snapshot row - see
           // _applySnapshot, which only ever updates an ALREADY-created entry's
           // live fields, so this never gets clobbered back to null once set.
-          armorTrim: p.armorTrim || null, shieldTrim: p.shieldTrim || null
+          trims: p.trims || null
         };
         this.remote.set(p.id, r);
       }
@@ -815,7 +1011,13 @@
         for (const row of s.w) {
           const [id, x, y, z, yaw] = row;
           const w = this.wolves.get(id);
-          if (w) { w.x = x; w.y = y; w.z = z; w.yaw = yaw; }
+          if (!w) continue;
+          // How far it actually moved between snapshots drives the walk
+          // cycle (see wolfPose) - the snapshot carries no velocity for
+          // wolves, and a leg swing keyed off real movement beats one
+          // keyed off a timer that keeps running while it stands still.
+          w.moved = Math.hypot(x - w.x, z - w.z);
+          w.x = x; w.y = y; w.z = z; w.yaw = yaw;
         }
       }
     }
@@ -957,7 +1159,7 @@
           if (!key) return;
           const piece = MC.ARMOR[key];
           slot.innerHTML = '';
-          slot.appendChild(global.MCTextures.itemIcon(key, 36, this.armorTier));
+          slot.appendChild(global.MCTextures.itemIcon(key, 36, this.armorTier, this._trimFor(key)));
           const tag = document.createElement('div');
           tag.className = 'count';
           tag.textContent = 'IV';
@@ -988,10 +1190,10 @@
       label.textContent = 'Chest';
       chestEl.appendChild(label);
       if (this.chestSlot === 'elytra') {
-        chestEl.appendChild(global.MCTextures.itemIcon('elytra', 36));
+        chestEl.appendChild(global.MCTextures.itemIcon('elytra', 36, null, this._trimFor('elytra')));
         chestEl.title = 'Elytra (drag out, or right-click it, to swap the chestplate back in)';
       } else {
-        chestEl.appendChild(global.MCTextures.itemIcon('chestplate', 36, this.armorTier));
+        chestEl.appendChild(global.MCTextures.itemIcon('chestplate', 36, this.armorTier, this._trimFor('chestplate')));
         const tag = document.createElement('div');
         tag.className = 'count';
         tag.textContent = 'IV';
@@ -1020,11 +1222,11 @@
       label.textContent = 'Off-hand';
       el2.appendChild(label);
       if (this.offhand === 'shield') {
-        el2.appendChild(global.MCTextures.itemIcon('shield', 36));
+        el2.appendChild(global.MCTextures.itemIcon('shield', 36, null, this._trimFor('shield')));
         el2.title = MC.SHIELD.name + ' (drag a firework, block, or totem here to swap it in)';
       } else {
         const item = ITEMS.find(i => i.key === this.offhand);
-        const icon = item.type === 'block' && this.renderer ? global.MCTextures.blockIcon(this.renderer.tiles, item.block, 36) : global.MCTextures.itemIcon(item.key, 36);
+        const icon = item.type === 'block' && this.renderer ? global.MCTextures.blockIcon(this.renderer.tiles, item.block, 36) : global.MCTextures.itemIcon(item.key, 36, this.armorTier, this._trimFor(item.key));
         el2.appendChild(icon);
         if (item.ammo !== undefined) {
           const count = document.createElement('div');
@@ -1053,7 +1255,7 @@
         cell.className = 'slot invslot' + (typeof idx === 'number' && idx === this.me.slot ? ' active' : '') + (idx === null ? ' empty' : '');
         cell.dataset.pos = pos;
         if (isChestplate) {
-          cell.appendChild(global.MCTextures.itemIcon('chestplate', 36, this.armorTier));
+          cell.appendChild(global.MCTextures.itemIcon('chestplate', 36, this.armorTier, this._trimFor('chestplate')));
           const tag = document.createElement('div');
           tag.className = 'count';
           tag.textContent = 'IV';
@@ -1061,7 +1263,7 @@
           cell.title = MC.ARMOR.chestplate.name + ' — Protection IV (drag back onto the chest armor slot to re-equip it)';
         } else if (idx !== null) {
           const item = ITEMS[idx];
-          const icon = item.type === 'block' ? global.MCTextures.blockIcon(tiles, item.block, 36) : global.MCTextures.itemIcon(item.key, 36);
+          const icon = item.type === 'block' ? global.MCTextures.blockIcon(tiles, item.block, 36) : global.MCTextures.itemIcon(item.key, 36, this.armorTier, this._trimFor(item.key));
           cell.appendChild(icon);
           const count = document.createElement('div');
           count.className = 'count';
@@ -1762,6 +1964,17 @@
           this._spawnEffectParticle(this.me.x, this.me.y + 0.9, this.me.z, colors && hexToRgb(colors[0]));
         }
       }
+      // Wolf walk cycles, driven by how far each one actually moved in the
+      // last snapshot (see _applySnapshot) - a gait that decays towards a
+      // standstill when it stops, so a waiting wolf settles instead of
+      // pedalling on the spot.
+      for (const w of this.wolves.values()) {
+        const moving = (w.moved || 0) > 0.008;
+        w.gait = (w.gait || 0) * 0.86 + (moving ? 0.14 : 0);
+        w.walkPhase = (w.walkPhase || 0) + dt * (5 + w.gait * 26);
+        if (w.idlePhase === undefined) w.idlePhase = Math.random() * 6.28;
+        w.idlePhase += dt * 1.7;
+      }
       this._updateRemotes(dt);
       this._updateProjectilesLocal(dt);
       if (this.hitmarkerT > 0) this.hitmarkerT -= dt;
@@ -2266,14 +2479,14 @@
         const isChestplate = idx === 'chestplate';
         cell.className = 'slot' + (typeof idx === 'number' && idx === this.me.slot ? ' active' : '') + (idx === null ? ' empty' : '');
         if (isChestplate) {
-          cell.appendChild(global.MCTextures.itemIcon('chestplate', 40, this.armorTier));
+          cell.appendChild(global.MCTextures.itemIcon('chestplate', 40, this.armorTier, this._trimFor('chestplate')));
           const tag = document.createElement('div');
           tag.className = 'count';
           tag.textContent = 'IV';
           cell.appendChild(tag);
         } else if (idx !== null) {
           const item = ITEMS[idx];
-          const icon = item.type === 'block' ? global.MCTextures.blockIcon(tiles, item.block, 40) : global.MCTextures.itemIcon(item.key, 40);
+          const icon = item.type === 'block' ? global.MCTextures.blockIcon(tiles, item.block, 40) : global.MCTextures.itemIcon(item.key, 40, this.armorTier, this._trimFor(item.key));
           cell.appendChild(icon);
           const count = document.createElement('div');
           count.className = 'count';
@@ -2298,11 +2511,11 @@
       slot.innerHTML = '';
       if (label) slot.appendChild(label);
       if (this.offhand === 'shield') {
-        slot.appendChild(global.MCTextures.itemIcon('shield', 40));
+        slot.appendChild(global.MCTextures.itemIcon('shield', 40, null, this._trimFor('shield')));
         slot.title = MC.SHIELD.name + ' — hold RMB with sword/pick to block';
       } else {
         const item = ITEMS.find(i => i.key === this.offhand);
-        const icon = item.type === 'block' && this.renderer ? global.MCTextures.blockIcon(this.renderer.tiles, item.block, 40) : global.MCTextures.itemIcon(item.key, 40);
+        const icon = item.type === 'block' && this.renderer ? global.MCTextures.blockIcon(this.renderer.tiles, item.block, 40) : global.MCTextures.itemIcon(item.key, 40, this.armorTier, this._trimFor(item.key));
         slot.appendChild(icon);
         if (item.ammo !== undefined) {
           const count = document.createElement('div');
@@ -2470,8 +2683,8 @@
         const heldItem = ITEMS[this.me.slot];
         const pose = poseFor(this.selfWalkPhase, this.swingT, heldItem, this.me.blocking);
         r.drawPlayer(this.mySkin, this.me.x, this.me.y, this.me.z, this.me.yaw, pose, [1, 1, 1], 1);
-        r.drawArmorLayer(this.armorTier, this.me.x, this.me.y, this.me.z, this.me.yaw, pose, this.myArmorTrim);
-        r.drawHeldItem(this.me.blocking ? r.getShieldTexture(this.myShieldTrim) : r.getIconTexture(heldItem), this.me.blocking ? 0.85 : 0.4);
+        r.drawArmorLayer(this.armorTier, this.me.x, this.me.y, this.me.z, this.me.yaw, pose, this.myTrims);
+        r.drawHeldItem(this.me.blocking ? r.getShieldTexture(this.myTrims && this.myTrims.shield) : r.getIconTexture(heldItem), this.me.blocking ? 0.85 : 0.4);
       }
 
       // remote players
@@ -2497,11 +2710,11 @@
         // Real inflated armor geometry worn over the body (see
         // MCEntities.armorParts), not a tint on the skin - drawn as a
         // separate pass right after the body so it layers on top.
-        r.drawArmorLayer(p.armor, p.x, p.y, p.z, p.yaw, pose, p.armorTrim);
+        r.drawArmorLayer(p.armor, p.x, p.y, p.z, p.yaw, pose, p.trims);
         // So you can tell what a bot/remote player is actually fighting with -
         // and a raised shield takes visual priority over whatever's in the
         // main hand, same as the local first-person viewmodel does.
-        r.drawHeldItem(p.blocking ? r.getShieldTexture(p.shieldTrim) : r.getIconTexture(heldItem), p.blocking ? 0.85 : 0.4);
+        r.drawHeldItem(p.blocking ? r.getShieldTexture(p.trims && p.trims.shield) : r.getIconTexture(heldItem), p.blocking ? 0.85 : 0.4);
         this._drawNameTag(p);
         if (p.swingT !== undefined && p.swingT >= 0 && p.swingT < 0.001) p.swingT = 0.001;
         if (p.swingT > 0.4) p.swingT = -1;
@@ -2514,7 +2727,7 @@
           if (tag) tag.node.style.display = 'none';
           continue;
         }
-        r.drawWolf(w.x, w.y, w.z, w.yaw, w.hasArmor);
+        r.drawWolf(w.x, w.y, w.z, w.yaw, w.hasArmor, wolfPose(w.walkPhase || 0, w.idlePhase || 0, w.gait || 0));
         this._drawNameTag(w);
       }
       if (this._damageNumbers && this._damageNumbers.length) this._drawDamageNumbers();
@@ -2717,7 +2930,7 @@
         // this cache never needs to invalidate mid-match.
         if (!tex[key]) {
           const size = blocking ? global.MCTextures.SHIELD_ICON_SIZE : 64;
-          tex[key] = uploadCanvasTex(gl, global.MCTextures.itemIcon(key, size, null, blocking ? this.myShieldTrim : null));
+          tex[key] = uploadCanvasTex(gl, global.MCTextures.itemIcon(key, size, null, blocking && this.myTrims ? this.myTrims.shield : null));
         }
         const vao = this._viewQuad || (this._viewQuad = quadVAO(gl));
         gl.useProgram(r.progEntity);
@@ -2759,20 +2972,19 @@
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
   function capitalize(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
 
-  /** Reads a saved trim grid (see the customize-trims editor) from
-   * localStorage - null if there's never been one saved, or it's corrupt/
-   * stale from an older grid size, so start()/net.connect() always get
-   * either a valid trim or a clean null rather than needing to re-validate. */
-  function loadTrim(key) {
+  /** Every saved trim (see the customize-trims editor), read back from
+   * localStorage - anything corrupt or left over from an older layout is
+   * dropped by sanitizeTrims, so start()/net.connect() always get either
+   * clean trims or null rather than having to re-validate. */
+  const TRIMS_KEY = 'mcpvp_trims';
+  function loadTrims() {
     try {
-      const raw = localStorage.getItem(key);
-      if (!raw) return null;
-      const arr = JSON.parse(raw);
-      return MC.isValidTrim(arr) ? arr : null;
+      const raw = localStorage.getItem(TRIMS_KEY);
+      return raw ? MC.sanitizeTrims(JSON.parse(raw)) : null;
     } catch (e) { return null; }
   }
-  function saveTrim(key, arr) {
-    try { localStorage.setItem(key, JSON.stringify(arr)); } catch (e) { /* private-window/quota - trim just won't persist */ }
+  function saveTrims(trims) {
+    try { localStorage.setItem(TRIMS_KEY, JSON.stringify(trims || {})); } catch (e) { /* private-window/quota - trims just won't persist */ }
   }
   function verbFor(cause) {
     return {
@@ -2811,6 +3023,28 @@
       // overriding its usual idle walk-swing.
       armL: blocking ? { rx: -2.1, ry: 0.5 } : { rx: -legSwing * 0.8 },
       armR: { rx: -legSwing * 0.5 - s * 1.8, ry: s * 0.3 }
+    };
+  }
+
+  /**
+   * Wolf pose: a diagonal trot (front-left with back-right, and vice versa,
+   * the way a real four-legged animal moves rather than both sides in
+   * lockstep), a tail that wags faster the harder it's running, a head that
+   * sniffs around while idle, and a small body bob synced to the stride.
+   * `gait` is 0..1 - how much it's actually moving (see update()).
+   */
+  function wolfPose(walkPhase, idlePhase, gait) {
+    const swing = Math.sin(walkPhase) * (0.25 + gait * 0.75);
+    const opp = Math.sin(walkPhase + Math.PI) * (0.25 + gait * 0.75);
+    return {
+      legFR: { rx: swing }, legBL: { rx: swing },
+      legFL: { rx: opp }, legBR: { rx: opp },
+      // Wags side to side, and lifts as it speeds up.
+      tail: { ry: Math.sin(walkPhase * 1.7) * (0.25 + gait * 0.5), rx: -0.35 * gait },
+      // Idle: slow sniffing sweep. Running: head dips forward into the run.
+      head: { ry: Math.sin(idlePhase) * 0.22 * (1 - gait), rx: gait * 0.18 + Math.sin(idlePhase * 1.3) * 0.05 },
+      body: { rx: Math.sin(walkPhase * 2) * 0.03 * gait },
+      bob: Math.abs(Math.sin(walkPhase)) * 0.045 * gait
     };
   }
 

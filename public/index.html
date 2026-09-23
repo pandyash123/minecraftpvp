@@ -80,13 +80,24 @@
   <div id="trimEditor" class="hidden">
     <div class="panel trimpanel">
       <h1>Customize Trims</h1>
-      <p class="sub">Paint a pattern onto your armor or shield - saved automatically in this browser, no need to re-import it next time.</p>
-      <div class="trimTabs">
-        <button type="button" class="trimTab active" id="trimTabArmor" data-target="armor">Armor</button>
-        <button type="button" class="trimTab" id="trimTabShield" data-target="shield">Shield</button>
+      <p class="sub">Paint each piece separately - saved automatically in this browser, no need to re-import it next time.</p>
+      <div class="trimTabs" id="trimTabs">
+        <button type="button" class="trimTab active" data-slot="helmet">Helmet</button>
+        <button type="button" class="trimTab" data-slot="chest">Chest</button>
+        <button type="button" class="trimTab" data-slot="legs">Legs</button>
+        <button type="button" class="trimTab" data-slot="boots">Boots</button>
+        <button type="button" class="trimTab" data-slot="elytra">Elytra</button>
+        <button type="button" class="trimTab" data-slot="shield">Shield</button>
       </div>
       <div class="trimBody">
-        <canvas id="trimCanvas" width="320" height="320"></canvas>
+        <div class="trimStage">
+          <canvas id="trimCanvas" width="320" height="320"></canvas>
+          <div class="trimRotateRow" id="trimRotateRow">
+            <button type="button" id="trimRotL" class="rotBtn">&#8634; Turn</button>
+            <button type="button" id="trimRotR" class="rotBtn">Turn &#8635;</button>
+          </div>
+          <div class="trimHint" id="trimHint"></div>
+        </div>
         <div class="trimControls">
           <div class="trimLabel">Color</div>
           <div class="trimPalette" id="trimPalette"></div>
@@ -96,7 +107,7 @@
             <button type="button" class="brushBtn" data-size="2">2</button>
             <button type="button" class="brushBtn" data-size="4">4</button>
           </div>
-          <button type="button" id="trimClearBtn" class="secondary">Clear</button>
+          <button type="button" id="trimClearBtn" class="secondary">Clear This Piece</button>
           <button type="button" id="trimExportBtn" class="secondary">Export to File</button>
           <button type="button" id="trimImportBtn" class="secondary">Import from File</button>
           <input type="file" id="trimImportInput" accept="application/json" class="hidden">

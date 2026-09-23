@@ -11,6 +11,14 @@
   const W = MC.WORLD;
   const CH = W.CHUNK;
   const ME = global.MCEntities;
+  // Which armorParts bones make up each painted piece (see the trim editor).
+  const ARMOR_PIECE_BONES = {
+    helmet: ['head'],
+    chest: ['body', 'armR', 'armL'],
+    legs: ['legR', 'legL'],
+    boots: ['bootR', 'bootL']
+  };
+  const ARMOR_PIECE_ORDER = ['helmet', 'chest', 'legs', 'boots'];
 
   const CHUNK_VS = `#version 300 es
   layout(location=0) in vec3 aPos;
@@ -220,7 +228,7 @@
       // Held-item icons for remote players (see drawHeldItem below).
       this.iconTex = new Map();
       this.itemQuadVAO = buildIconQuadVAO(gl);
-      // Custom-trim textures (see getCustomArmorTexture/getShieldTexture),
+      // Custom-trim textures (see getPieceArmorTexture/getShieldTexture),
       // keyed by the trim array's own reference rather than a player id -
       // a WeakMap means an old texture is simply dropped by the GC once
       // nothing (no remote-player entry) references that trim array anymore
@@ -228,6 +236,7 @@
       this.customArmorTex = new WeakMap();
       this.shieldTex = new WeakMap();
       this.defaultShieldTex = null;
+      this.wolfTex = {};
       this._armRMatrix = M4.create();
       this._haveArmR = false;
 
@@ -261,12 +270,24 @@
       return t;
     }
 
-    /** Same as getArmorTexture, but stamped with a player-painted trim (see
-     * MC.isValidTrim) - cached per trim array rather than per tier, since
-     * every player with a trim gets their own one-off texture. */
-    getCustomArmorTexture(tier, trim) {
-      let t = this.customArmorTex.get(trim);
-      if (!t) { t = global.MCTextures.createArmorTexture(this.gl, tier, trim); this.customArmorTex.set(trim, t); }
+    /** The texture for one armor piece: the plain tier swatch, or a one-off
+     * stamped with that player's painted grid for this piece. Cached per
+     * grid array (a WeakMap, so it's dropped once the owner's remote entry
+     * goes away), keyed within that by tier+piece since leggings and boots
+     * share atlas rects and must not share a texture. */
+    getPieceArmorTexture(tier, pieceKey, grid) {
+      if (!MC.isValidTrim(grid)) return this.getArmorTexture(tier);
+      let byPiece = this.customArmorTex.get(grid);
+      if (!byPiece) { byPiece = {}; this.customArmorTex.set(grid, byPiece); }
+      const k = tier + ':' + pieceKey;
+      if (!byPiece[k]) byPiece[k] = global.MCTextures.createArmorTexture(this.gl, tier, pieceKey, grid);
+      return byPiece[k];
+    }
+
+    getWolfTexture(armored) {
+      const k = armored ? 'armored' : 'fur';
+      let t = this.wolfTex[k];
+      if (!t) { t = this.wolfTex[k] = global.MCTextures.createWolfTexture(this.gl, armored); }
       return t;
     }
 
@@ -458,13 +479,12 @@
      * geometry worn over the body, not a tint on the skin. No-ops for
      * armorTier 'none'/falsy.
      */
-    drawArmorLayer(armorTier, x, y, z, yaw, pose, trim) {
+    drawArmorLayer(armorTier, x, y, z, yaw, pose, trims) {
       if (!armorTier || armorTier === 'none') return;
       const gl = this.gl;
       gl.useProgram(this.progEntity);
       gl.uniformMatrix4fv(this.progEntity.u.uVP, false, this.viewProj);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, MC.isValidTrim(trim) ? this.getCustomArmorTexture(armorTier, trim) : this.getArmorTexture(armorTier));
       gl.uniform1i(this.progEntity.u.uTex, 0);
       gl.uniform3fv(this.progEntity.u.uTint, [1, 1, 1]);
       gl.uniform1f(this.progEntity.u.uAlpha, 1);
@@ -474,23 +494,28 @@
       const base = M4.create();
       M4.fromTRS(base, x, y, z, 0, yaw, 0, 1, 1, 1);
 
-      const parts = ['head', 'body', 'legR', 'legL', 'armR', 'armL', 'bootR', 'bootL'];
       // Boots aren't in `pose` (poseFor() only knows the six playerParts
       // bones) - they ride the same leg swing as the leggings covering
       // that same leg, so borrow that entry.
       const poseKey = { bootR: 'legR', bootL: 'legL' };
       const m = M4.create(), local = M4.create(), tmp = M4.create();
-      for (const key of parts) {
-        const part = this.armorParts[key];
-        const p = pose[poseKey[key] || key] || { rx: 0, ry: 0, rz: 0 };
-        const pivot = part.pivot;
-        M4.fromTRS(local, pivot[0], pivot[1], pivot[2], p.rx || 0, p.ry || 0, p.rz || 0, 1, 1, 1);
-        M4.multiply(tmp, base, local);
-        m.set(tmp);
-        gl.uniformMatrix4fv(this.progEntity.u.uModel, false, m);
-        const vao = this.armorVAOs[key];
-        gl.bindVertexArray(vao.vao);
-        gl.drawElements(gl.TRIANGLES, vao.count, gl.UNSIGNED_SHORT, 0);
+      // Drawn a piece at a time rather than all eight boxes in one pass:
+      // each piece is painted separately in the editor, so each needs its
+      // own texture bound (see getPieceArmorTexture).
+      for (const pieceKey of ARMOR_PIECE_ORDER) {
+        gl.bindTexture(gl.TEXTURE_2D, this.getPieceArmorTexture(armorTier, pieceKey, trims && trims[pieceKey]));
+        for (const key of ARMOR_PIECE_BONES[pieceKey]) {
+          const part = this.armorParts[key];
+          const p = pose[poseKey[key] || key] || { rx: 0, ry: 0, rz: 0 };
+          const pivot = part.pivot;
+          M4.fromTRS(local, pivot[0], pivot[1], pivot[2], p.rx || 0, p.ry || 0, p.rz || 0, 1, 1, 1);
+          M4.multiply(tmp, base, local);
+          m.set(tmp);
+          gl.uniformMatrix4fv(this.progEntity.u.uModel, false, m);
+          const vao = this.armorVAOs[key];
+          gl.bindVertexArray(vao.vao);
+          gl.drawElements(gl.TRIANGLES, vao.count, gl.UNSIGNED_SHORT, 0);
+        }
       }
       gl.bindVertexArray(null);
     }
@@ -504,7 +529,7 @@
      * pose) - a moving wolf still reads fine since the whole body glides
      * forward, it just doesn't have a walk cycle.
      */
-    drawWolf(x, y, z, yaw, hasArmor) {
+    drawWolf(x, y, z, yaw, hasArmor, pose) {
       const gl = this.gl;
       gl.useProgram(this.progEntity);
       gl.uniformMatrix4fv(this.progEntity.u.uVP, false, this.viewProj);
@@ -513,15 +538,19 @@
       gl.enable(gl.CULL_FACE);
       gl.cullFace(gl.BACK);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.getArmorTexture(hasArmor ? 'dog_armor' : 'wolf_fur'));
+      gl.bindTexture(gl.TEXTURE_2D, this.getWolfTexture(hasArmor));
       gl.uniform1i(this.progEntity.u.uTex, 0);
 
+      const p = pose || {};
+      // The whole animal rides a slight vertical bob (see wolfPose) so it
+      // doesn't glide along like a box on rails.
       const base = M4.create();
-      M4.fromTRS(base, x, y, z, 0, yaw, 0, 1, 1, 1);
+      M4.fromTRS(base, x, y + (p.bob || 0), z, 0, yaw, 0, 1, 1, 1);
       const m = M4.create(), local = M4.create(), tmp = M4.create();
       for (const key in this.wolfParts) {
         const pivot = this.wolfParts[key].pivot;
-        M4.fromTRS(local, pivot[0], pivot[1], pivot[2], 0, 0, 0, 1, 1, 1);
+        const r = p[key] || { rx: 0, ry: 0, rz: 0 };
+        M4.fromTRS(local, pivot[0], pivot[1], pivot[2], r.rx || 0, r.ry || 0, r.rz || 0, 1, 1, 1);
         M4.multiply(tmp, base, local);
         m.set(tmp);
         gl.uniformMatrix4fv(this.progEntity.u.uModel, false, m);

@@ -493,6 +493,27 @@
     return true;
   }
 
+  // Each armor piece is painted separately (see the customize-trims editor),
+  // so a player's trims are one grid per slot rather than a single pattern
+  // smeared over everything. Elytra and shield ride along as flat 2D items.
+  var TRIM_SLOTS = ['helmet', 'chest', 'legs', 'boots', 'elytra', 'shield'];
+
+  /** Keeps only well-formed grids for known slots - anything else in a
+   * stale/tampered payload is dropped rather than trusted. Returns null when
+   * nothing survives, so "no trims" is one value instead of an empty object. */
+  function sanitizeTrims(trims) {
+    if (!trims || typeof trims !== 'object') return null;
+    var out = null;
+    for (var i = 0; i < TRIM_SLOTS.length; i++) {
+      var slot = TRIM_SLOTS[i];
+      if (isValidTrim(trims[slot])) {
+        if (!out) out = {};
+        out[slot] = trims[slot];
+      }
+    }
+    return out;
+  }
+
   var COMBAT = {
     MAX_HEALTH: 20,
     REACH_BLOCK: 5.0,
@@ -872,7 +893,9 @@
     TRIM_GRID: TRIM_GRID,
     TRIM_CELLS: TRIM_CELLS,
     TRIM_PALETTE: TRIM_PALETTE,
+    TRIM_SLOTS: TRIM_SLOTS,
     isValidTrim: isValidTrim,
+    sanitizeTrims: sanitizeTrims,
     COMBAT: COMBAT,
     PHYS: PHYS,
     breakTime: breakTime,

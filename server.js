@@ -335,7 +335,7 @@ function baseWeaponKey(key) {
   return key === 'netherite_sword' ? 'sword' : key === 'netherite_axe' ? 'axe' : key;
 }
 
-function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, swordTier, axeTier, dogArmor, armorTrim, shieldTrim) {
+function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, swordTier, axeTier, dogArmor, trims) {
   const s = pick(spawns);
   // A custom loadout is human-only, and only every key that's actually a
   // real ITEMS entry - anything else (a stale/tampered client) is silently
@@ -362,12 +362,12 @@ function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, s
     // Decided once at join (the menu's "Give wolves armor" checkbox) -
     // every wolf this player's eggs spawn gets it or doesn't, see spawnWolf().
     dogArmor: !isBot && !!dogArmor,
-    // Player-painted armor/shield patterns (see the customize-trims menu
-    // editor and MC.isValidTrim) - human-only, fixed for the whole session
-    // like every other menu-chosen cosmetic here, and included in
-    // publicPlayer() so everyone else's client can render them too.
-    armorTrim: !isBot && MC.isValidTrim(armorTrim) ? armorTrim : null,
-    shieldTrim: !isBot && MC.isValidTrim(shieldTrim) ? shieldTrim : null,
+    // Player-painted patterns, one grid per armor piece plus elytra/shield
+    // (see the customize-trims menu editor and MC.sanitizeTrims) - human-
+    // only, fixed for the whole session like every other menu-chosen
+    // cosmetic here, and included in publicPlayer() so everyone else's
+    // client can render them too.
+    trims: isBot ? null : MC.sanitizeTrims(trims),
     enchants: isBot ? MC.defaultEnchantOpts() : mergeEnchantOpts(enchantOpts),
     x: s[0], y: s[1], z: s[2],
     vx: 0, vy: 0, vz: 0,
@@ -437,7 +437,7 @@ function publicPlayer(p) {
     health: p.health, absorption: p.absorption, alive: p.alive,
     slot: p.slot, sneak: p.sneak, sprint: p.sprint, blocking: p.blocking,
     kills: p.kills, deaths: p.deaths, streak: p.streak,
-    armorTrim: p.armorTrim || null, shieldTrim: p.shieldTrim || null
+    trims: p.trims || null
   };
 }
 
@@ -2042,7 +2042,7 @@ io.on('connection', socket => {
     // -> treat this as a fresh session and clear whatever got built/broken
     // last time. Never wipes a map other real players are still using.
     if (![...players.values()].some(p => !p.bot)) resetWorld();
-    me = makePlayer(socket.id, name, false, data && data.armor, kit, data && data.customItems, data && data.enchantOpts, data && data.swordTier, data && data.axeTier, data && data.dogArmor, data && data.armorTrim, data && data.shieldTrim);
+    me = makePlayer(socket.id, name, false, data && data.armor, kit, data && data.customItems, data && data.enchantOpts, data && data.swordTier, data && data.axeTier, data && data.dogArmor, data && data.trims);
     me.socket = socket;
     players.set(me.id, me);
 
