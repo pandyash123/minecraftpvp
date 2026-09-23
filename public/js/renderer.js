@@ -209,6 +209,9 @@
       this.armorVAOs = {};
       for (const k in this.armorParts) this.armorVAOs[k] = entityVAO(gl, this.armorParts[k].geo);
       this.armorTex = new Map();
+      this.wolfParts = ME.wolfParts();
+      this.wolfVAOs = {};
+      for (const k in this.wolfParts) this.wolfVAOs[k] = entityVAO(gl, this.wolfParts[k].geo);
 
       this.particles = { data: new Float32Array(2000 * 8), n: 0, cap: 2000 };
       this.particleVAO = null;
@@ -455,6 +458,43 @@
         m.set(tmp);
         gl.uniformMatrix4fv(this.progEntity.u.uModel, false, m);
         const vao = this.armorVAOs[key];
+        gl.bindVertexArray(vao.vao);
+        gl.drawElements(gl.TRIANGLES, vao.count, gl.UNSIGNED_SHORT, 0);
+      }
+      gl.bindVertexArray(null);
+    }
+
+    /**
+     * Draws a wolf: a blocky fur-colored body/head/tail/legs shell, or the
+     * Dog Armor color instead of fur if hasArmor (no separate inflated
+     * armor geometry, so this swaps the color rather than layering a
+     * second shell on top - avoids z-fighting two identical-size passes
+     * would cause). No leg-swing animation yet (each part sits at its rest
+     * pose) - a moving wolf still reads fine since the whole body glides
+     * forward, it just doesn't have a walk cycle.
+     */
+    drawWolf(x, y, z, yaw, hasArmor) {
+      const gl = this.gl;
+      gl.useProgram(this.progEntity);
+      gl.uniformMatrix4fv(this.progEntity.u.uVP, false, this.viewProj);
+      gl.uniform3fv(this.progEntity.u.uTint, [1, 1, 1]);
+      gl.uniform1f(this.progEntity.u.uAlpha, 1);
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.getArmorTexture(hasArmor ? 'dog_armor' : 'wolf_fur'));
+      gl.uniform1i(this.progEntity.u.uTex, 0);
+
+      const base = M4.create();
+      M4.fromTRS(base, x, y, z, 0, yaw, 0, 1, 1, 1);
+      const m = M4.create(), local = M4.create(), tmp = M4.create();
+      for (const key in this.wolfParts) {
+        const pivot = this.wolfParts[key].pivot;
+        M4.fromTRS(local, pivot[0], pivot[1], pivot[2], 0, 0, 0, 1, 1, 1);
+        M4.multiply(tmp, base, local);
+        m.set(tmp);
+        gl.uniformMatrix4fv(this.progEntity.u.uModel, false, m);
+        const vao = this.wolfVAOs[key];
         gl.bindVertexArray(vao.vao);
         gl.drawElements(gl.TRIANGLES, vao.count, gl.UNSIGNED_SHORT, 0);
       }

@@ -193,6 +193,12 @@
     { key: 'bow', name: 'Bow', type: 'bow', maxDamage: 10, minDamage: 2, drawTime: 1.0, mineSpeed: 0.3 },
     // ammo here doubles as the max stack size - also what you spawn with.
     { key: 'pearl', name: 'Ender Pearl', type: 'pearl', ammo: 16, cooldown: 1.6, mineSpeed: 0.3 },
+    // Right-click to spawn a wolf a couple blocks in front of you - it's
+    // loyal only to whoever's egg spawned it (see ownerId in server.js):
+    // follows you around, never attacks you, and fights back for you if you
+    // or it gets hit. Dog Armor (see the menu's "Give wolves armor"
+    // checkbox) is decided per-owner at join, not per-egg.
+    { key: 'wolf_spawn_egg', name: 'Wolf Spawn Egg', type: 'spawn_egg', ammo: 4, cooldown: 1.0, mineSpeed: 0.3 },
     // Absorption is instant on eating; the 4 hearts of real healing trickle
     // in afterward via Regeneration I (8 HP over 8s = 1 HP/s), not a flat
     // instant heal.
@@ -339,7 +345,7 @@
         'crossbow', 'trident', 'stick', 'egap',
         'water_bucket', 'lava_bucket', 'tnt', 'tnt_minecart', 'rail', 'flint_steel',
         'powder_snow_bucket', 'totem', 'firework',
-        'end_crystal', 'respawn_anchor', 'glowstone']
+        'end_crystal', 'respawn_anchor', 'glowstone', 'wolf_spawn_egg']
       // netherite_sword/netherite_axe are deliberately NOT listed here -
       // they're a tier swap on top of sword/axe (see swordTier/axeTier,
       // set at join), not separate items you'd pick alongside them. Only
@@ -514,6 +520,15 @@
     SPEAR_CHARGE_DMG_MULT: 1.6,
     SPEAR_CHARGE_LUNGE_MULT: 2.2,
     SPEAR_CHARGE_REACH_BONUS: 2.5,
+    // A charged thrust also rewards actually charging INTO the hit, jousting-
+    // style: extra damage scaled off the wielder's own horizontal speed at
+    // the instant it lands, on top of the flat multiplier above. Below
+    // SPEAR_CHARGE_MIN_SPEED (walking pace) it's a no-op - only sprinting or
+    // riding a Lunge dash into someone earns the bonus - and it's capped so
+    // a chained air-lunge combo can't one-shot outright.
+    SPEAR_CHARGE_MIN_SPEED: 3,
+    SPEAR_CHARGE_SPEED_DMG_PER_UNIT: 0.35,
+    SPEAR_CHARGE_MAX_SPEED_BONUS: 8,
 
     // Wind Charge projectile + its self-launch and blast knockback.
     WINDCHARGE_SPEED: 26,
@@ -734,7 +749,24 @@
     // Triggered by weather's random strikes, a Channeling trident hit, and
     // (cosmetically only, no damage) wherever a player/bot just died.
     LIGHTNING_STRIKE_RADIUS: 4.5,
-    LIGHTNING_STRIKE_DMG: 5
+    LIGHTNING_STRIKE_DMG: 5,
+
+    // Wolves: spawned by a Wolf Spawn Egg, loyal only to whoever's egg it
+    // was (see ownerId in server.js). Dog Armor is a flat damage-reduction
+    // fraction rather than a full armor-tier simulation - simpler, and a
+    // wolf's low health pool means even vanilla-accurate protection values
+    // would round to "takes noticeably less damage" anyway.
+    WOLF_SPAWN_REACH: 4,
+    WOLF_HEALTH: 20,
+    WOLF_ARMOR_BONUS_HEALTH: 10,
+    WOLF_ARMOR_DMG_REDUCTION: 0.3,
+    WOLF_DAMAGE: 4,
+    WOLF_ATTACK_REACH: 2.2,
+    WOLF_ATTACK_COOLDOWN: 1.0,
+    WOLF_FOLLOW_SPEED: 5,
+    WOLF_FOLLOW_MIN_DIST: 3,
+    WOLF_FOLLOW_MAX_DIST: 14, // beyond this, teleport back to the owner instead of trotting the whole way
+    WOLF_LOYALTY_RANGE: 40 // an owner hit further than this away doesn't call wolves in from across the map
   };
 
   var PHYS = {

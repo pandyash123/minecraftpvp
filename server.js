@@ -120,9 +120,13 @@ let defaultBotKit = MC.KITS[process.env.KIT] ? process.env.KIT : 'web';
 // at random (axe only if their kit includes it) so you can see (and fight)
 // both - `slot` is the ITEMS index the bot reports so remote clients render
 // the right item in its hand.
+// `slot` is looked up by key instead of a hardcoded literal - ITEMS is a
+// shared array whose indices shift whenever an item gets inserted anywhere
+// before sword/axe (as netherite_sword/netherite_axe now do), and a stale
+// hardcoded index here would make bots visibly hold/report the wrong item.
 const BOT_WEAPONS = {
-  sword: { key: 'sword', slot: 0, damage: 6, cooldown: 0.42 },
-  axe: { key: 'axe', slot: 8, damage: 9, cooldown: 0.9 }
+  sword: { key: 'sword', slot: MC.ITEMS.findIndex(i => i.key === 'sword'), damage: 6, cooldown: 0.42 },
+  axe: { key: 'axe', slot: MC.ITEMS.findIndex(i => i.key === 'axe'), damage: 9, cooldown: 0.9 }
 };
 function pickBotWeapon(kit) {
   if (!MC.kitHasItem(kit, 'axe')) return 'sword';
@@ -181,6 +185,13 @@ let liquidSpreadQueue = [];
 // Respawn Anchor charge counts, keyed by "x,y,z" - see the 'chargeAnchor'
 // handler. Reaching COMBAT.ANCHOR_MAX_CHARGES detonates it immediately.
 const anchorCharges = new Map();
+// Wolves spawned from a Wolf Spawn Egg - a separate map from `players`
+// since they don't have a kit/inventory/armor tier/any of that, just a
+// simple health pool, an owner, and the stepWolf() AI below. Removed
+// outright on death (no respawn - a wolf dying is permanent, same as
+// vanilla), and when their owner disconnects (see the 'disconnect' handler).
+const wolves = new Map();
+let nextWolfId = 1;
 
 const BOT_NAMES = ['Steve', 'Alex', 'Herobrine', 'Notch', 'Zombie_Slayer', 'CreeperFan',
   'DiamondSword', 'Enderman', 'PvP_God', 'BlockBuster', 'xX_Miner_Xx', 'RedstoneRick'];
@@ -236,7 +247,8 @@ function freshAmmo() {
     pot_turtle: ITEM_BY_KEY.pot_turtle.ammo, pot_health: ITEM_BY_KEY.pot_health.ammo, egap: ITEM_BY_KEY.egap.ammo,
     water_bucket: ITEM_BY_KEY.water_bucket.ammo, lava_bucket: ITEM_BY_KEY.lava_bucket.ammo,
     tnt: ITEM_BY_KEY.tnt.ammo, tnt_minecart: ITEM_BY_KEY.tnt_minecart.ammo,
-    powder_snow_bucket: ITEM_BY_KEY.powder_snow_bucket.ammo, totem: ITEM_BY_KEY.totem.ammo, firework: ITEM_BY_KEY.firework.ammo
+    powder_snow_bucket: ITEM_BY_KEY.powder_snow_bucket.ammo, totem: ITEM_BY_KEY.totem.ammo, firework: ITEM_BY_KEY.firework.ammo,
+    wolf_spawn_egg: ITEM_BY_KEY.wolf_spawn_egg.ammo
   };
 }
 
@@ -323,7 +335,7 @@ function baseWeaponKey(key) {
   return key === 'netherite_sword' ? 'sword' : key === 'netherite_axe' ? 'axe' : key;
 }
 
-function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, swordTier, axeTier) {
+function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, swordTier, axeTier, dogArmor) {
   const s = pick(spawns);
   // A custom loadout is human-only, and only every key that's actually a
   // real ITEMS entry - anything else (a stale/tampered client) is silently
@@ -347,6 +359,9 @@ function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, s
     // human-only (bots always get the plain version); see playerHasItem().
     swordTier: !isBot && swordTier === 'netherite' ? 'netherite' : 'diamond',
     axeTier: !isBot && axeTier === 'netherite' ? 'netherite' : 'diamond',
+    // Decided once at join (the menu's "Give wolves armor" checkbox) -
+    // every wolf this player's eggs spawn gets it or doesn't, see spawnWolf().
+    dogArmor: !isBot && !!dogArmor,
     enchants: isBot ? MC.defaultEnchantOpts() : mergeEnchantOpts(enchantOpts),
     x: s[0], y: s[1], z: s[2],
     vx: 0, vy: 0, vz: 0,
@@ -545,7 +560,7 @@ function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
   // combat hits - fall, void and self-inflicted damage bypass armor, same
   // as vanilla.
   let blocked = false;
-  if (cause === 'sword' || cause === 'arrow' || cause === 'axe' || cause === 'mace' || cause === 'spear' || cause === 'trident' || cause === 'stick' || cause === 'tnt' || cause === 'firework' || cause === 'crystal' || cause === 'anchor') {
+  if (cause === 'sword' || cause === 'arrow' || cause === 'axe' || cause === 'mace' || cause === 'spear' || cause === 'trident' || cause === 'stick' || cause === 'tnt' || cause === 'firework' || cause === 'crystal' || cause === 'anchor' || cause === 'wolf') {
     // Protection IV is always-on for bots (their fixed ARMOR_TIERS entry) but
     // an opt-in toggle for the human player (see enchants.armor.protection,
     // set at join) - build an effective tier with that swapped in rather
@@ -621,6 +636,18 @@ function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
   victim.health = Math.max(0, victim.health - dmg);
   victim.lastDamage = t;
   if (blocked) io.emit('effect', { kind: 'block', x: victim.x, y: victim.y + 1.2, z: victim.z });
+
+  // Wolf loyalty: any wolves owned by the victim redirect to whoever just
+  // hurt them, same "defend your owner" behavior as vanilla tamed wolves -
+  // skipped for self-inflicted/environmental damage (no source) and for a
+  // hit that came from the victim's own wolf (no infinite retarget loop).
+  if (source && source.id !== victim.id && wolves.size) {
+    for (const w of wolves.values()) {
+      if (w.ownerId === victim.id && Math.hypot(source.x - victim.x, source.z - victim.z) <= C.WOLF_LOYALTY_RANGE) {
+        w.targetId = source.id;
+      }
+    }
+  }
 
   const kb = { x: kbX || 0, y: kbY === undefined ? 0.42 : kbY, z: kbZ || 0 };
   // Knockback Resistance (netherite's knockbackResist) - applies to every
@@ -1386,6 +1413,117 @@ function stepAttackDummy(bot, t) {
   }
 }
 
+/** Spawns a wolf a couple blocks in front of `owner`, loyal only to them
+ * (see stepWolf/damageWolf below for what that actually means). hasArmor
+ * is decided once at the owner's join (the menu's "Give wolves armor"
+ * checkbox), not per-egg. */
+function spawnWolf(owner, hasArmor) {
+  const dir = ownerLookDir(owner);
+  const id = 'wolf' + (nextWolfId++);
+  const maxHealth = C.WOLF_HEALTH + (hasArmor ? C.WOLF_ARMOR_BONUS_HEALTH : 0);
+  const wolf = {
+    id, ownerId: owner.id, name: owner.name + "'s Wolf",
+    x: owner.x + dir[0] * 2, y: owner.y, z: owner.z + dir[2] * 2,
+    vx: 0, vy: 0, vz: 0, yaw: owner.yaw, pitch: 0, onGround: true,
+    health: maxHealth, maxHealth, alive: true, hasArmor: !!hasArmor,
+    targetId: null, lastAttack: 0, lastSeen: now()
+  };
+  wolves.set(id, wolf);
+  io.emit('wolfSpawn', publicWolf(wolf));
+  return wolf;
+}
+
+/** Look direction from yaw/pitch alone (no MC.PHYS.EYE offset needed here -
+ * this only picks a spawn direction, not an eye-level raycast origin). Same
+ * convention as game.js's _lookDir()/every other yaw-to-vector spot in this
+ * file (yaw 0 == -Z). */
+function ownerLookDir(p) {
+  return [-Math.sin(p.yaw), 0, -Math.cos(p.yaw)];
+}
+
+function publicWolf(w) {
+  return { id: w.id, ownerId: w.ownerId, name: w.name, x: w.x, y: w.y, z: w.z, yaw: w.yaw, health: w.health, maxHealth: w.maxHealth, alive: w.alive, hasArmor: w.hasArmor };
+}
+
+/** Damages a wolf - deliberately simpler than applyDamage's full armor/
+ * shield/enchant pipeline (a wolf has none of that), just Dog Armor's flat
+ * reduction. Retaliation (see stepWolf) is handled by the caller, same as
+ * a player's applyDamage callers already know who dealt the hit. */
+function damageWolf(wolf, amount, source) {
+  if (!wolf.alive || amount <= 0) return;
+  const dmg = wolf.hasArmor ? amount * (1 - C.WOLF_ARMOR_DMG_REDUCTION) : amount;
+  wolf.health = Math.max(0, wolf.health - dmg);
+  io.emit('wolfHp', { id: wolf.id, health: wolf.health });
+  if (wolf.health <= 0) {
+    wolf.alive = false;
+    io.emit('wolfDeath', { id: wolf.id });
+    wolves.delete(wolf.id);
+    return;
+  }
+  if (source && source.id !== wolf.ownerId) wolf.targetId = source.id;
+}
+
+function stepWolf(wolf, dt, t) {
+  const owner = players.get(wolf.ownerId);
+  if (!owner) { wolves.delete(wolf.id); io.emit('wolfDeath', { id: wolf.id }); return; }
+
+  // A target stops being valid if it died, disconnected, is the wolf's own
+  // owner (never happens through damageWolf's guard, but re-checked here in
+  // case ownership context changes), or wandered out of the loyalty range.
+  let target = wolf.targetId ? players.get(wolf.targetId) : null;
+  if (target && (!target.alive || target.id === wolf.ownerId || Math.hypot(target.x - wolf.x, target.z - wolf.z) > C.WOLF_LOYALTY_RANGE)) {
+    target = null; wolf.targetId = null;
+  }
+
+  const input = { forward: 0, strafe: 0, jump: false, sneak: false, sprint: false, yaw: wolf.yaw };
+
+  if (target) {
+    const dx = target.x - wolf.x, dz = target.z - wolf.z, dy = target.y - wolf.y;
+    const dist = Math.hypot(dx, dz);
+    const wantYaw = Math.atan2(-dx, -dz);
+    let diff = wantYaw - wolf.yaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    wolf.yaw += clamp(diff, -6 * dt, 6 * dt);
+    if (dist > C.WOLF_ATTACK_REACH - 0.3) {
+      input.forward = 1; input.sprint = true;
+    } else if (t - wolf.lastAttack > C.WOLF_ATTACK_COOLDOWN && Math.abs(dy) < 2.2) {
+      wolf.lastAttack = t;
+      io.emit('swing', { id: wolf.id });
+      const l = Math.hypot(dx, dz) || 1;
+      // Passing the wolf itself as `source` (not null) keeps spawn
+      // protection and the victim's-own-wolves-retaliate hook above both
+      // working correctly - shieldBlocks()/withinFOV() only touch x/y/z/
+      // yaw, which a wolf has same as any player.
+      applyDamage(target, C.WOLF_DAMAGE, wolf, 'wolf', (dx / l) * 0.5, (dz / l) * 0.5, 0.36);
+    }
+  } else {
+    // No target: follow the owner, same "close enough, just idle" rule as
+    // a real pet rather than a bot that paces the exact same spot.
+    const dx = owner.x - wolf.x, dz = owner.z - wolf.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > C.WOLF_FOLLOW_MAX_DIST) {
+      // Fell too far behind (owner pearled/sprinted off) - reappear at
+      // their side instead of visibly teleporting mid-view when possible.
+      const dir = ownerLookDir(owner);
+      wolf.x = owner.x - dir[0] * 2; wolf.y = owner.y; wolf.z = owner.z - dir[2] * 2;
+      wolf.vx = wolf.vy = wolf.vz = 0;
+      io.emit('wolfTeleport', { id: wolf.id, x: wolf.x, y: wolf.y, z: wolf.z });
+    } else if (dist > C.WOLF_FOLLOW_MIN_DIST) {
+      const wantYaw = Math.atan2(-dx, -dz);
+      let diff = wantYaw - wolf.yaw;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      wolf.yaw += clamp(diff, -6 * dt, 6 * dt);
+      input.forward = 1;
+      input.sprint = dist > C.WOLF_FOLLOW_MIN_DIST * 2.5;
+    }
+  }
+
+  input.yaw = wolf.yaw;
+  Physics.step(getBlock, wolf, input, dt);
+}
+
 function stepBot(bot, dt, t) {
   if (!bot.alive) return;
   if (bot.dummy && !bot.attackDummy) return; // a training dummy never moves or fights back
@@ -1761,6 +1899,11 @@ function tick() {
     }
   }
 
+  // Wolves - stepWolf() also handles despawning one whose owner disconnected
+  // (players.delete already happened by the time this runs, so it just
+  // shows up as a missing owner here, no separate cleanup needed elsewhere).
+  for (const w of wolves.values()) stepWolf(w, dt, t);
+
   // TNT / TNT Minecart fuses - explode anything whose timer has run out.
   if (liveTNT.length) {
     const stillLit = [];
@@ -1841,7 +1984,14 @@ function sendSnapshot() {
   const prj = projectiles.map(p => [p.id, p.kind === 'pearl' ? 1 : 0,
     Math.round(p.x * 100) / 100, Math.round(p.y * 100) / 100, Math.round(p.z * 100) / 100,
     Math.round(p.vx * 10) / 10, Math.round(p.vy * 10) / 10, Math.round(p.vz * 10) / 10]);
-  io.volatile.emit('snapshot', { t: Date.now(), p: list, r: prj });
+  // Wolves move continuously like players, so they ride the same
+  // high-frequency snapshot rather than one-off events (those - wolfSpawn/
+  // wolfHp/wolfDeath/wolfTeleport - only cover state *changes*).
+  const wlv = [];
+  for (const w of wolves.values()) {
+    wlv.push([w.id, Math.round(w.x * 100) / 100, Math.round(w.y * 100) / 100, Math.round(w.z * 100) / 100, Math.round(w.yaw * 1000) / 1000]);
+  }
+  io.volatile.emit('snapshot', { t: Date.now(), p: list, r: prj, w: wlv });
 }
 
 // ---------------------------------------------------------------- server ---
@@ -1885,7 +2035,7 @@ io.on('connection', socket => {
     // -> treat this as a fresh session and clear whatever got built/broken
     // last time. Never wipes a map other real players are still using.
     if (![...players.values()].some(p => !p.bot)) resetWorld();
-    me = makePlayer(socket.id, name, false, data && data.armor, kit, data && data.customItems, data && data.enchantOpts, data && data.swordTier, data && data.axeTier);
+    me = makePlayer(socket.id, name, false, data && data.armor, kit, data && data.customItems, data && data.enchantOpts, data && data.swordTier, data && data.axeTier, data && data.dogArmor);
     me.socket = socket;
     players.set(me.id, me);
 
@@ -1931,7 +2081,7 @@ io.on('connection', socket => {
     me.blocking = !!d.bl && now() > (me.shieldStunUntil || 0);
     me.slot = clamp(d.slot | 0, 0, MC.ITEMS.length - 1);
     me.gliding = !!d.gl && playerHasItem(me, 'elytra');
-    me.offhandKey = (typeof d.oh === 'string' && (d.oh === 'shield' || ITEM_BY_KEY[d.oh])) ? d.oh : 'shield';
+    me.offhandKey = (typeof d.oh === 'string' && (d.oh === 'shield' || (ITEM_BY_KEY[d.oh] && playerHasItem(me, d.oh)))) ? d.oh : 'shield';
     me.chestSlot = (d.ch === 'elytra' && playerHasItem(me, 'elytra')) ? 'elytra' : 'chestplate';
     trackFall(me, prevY, wasGround);
   });
@@ -1973,17 +2123,26 @@ io.on('connection', socket => {
     const minReach = item.minReach || 0;
     const rawIds = item.pierce && Array.isArray(d.ids) ? d.ids.slice(0, 8) : [d.id];
     const hits = [];
+    // Wolves live in their own map (see damageWolf) rather than `players`,
+    // so a swing checks both - same reach rules either way.
+    const wolfHits = [];
     for (const id of rawIds) {
       const victim = players.get(id);
-      if (!victim || !victim.alive || victim.id === me.id) continue;
-      const dist = Math.hypot(victim.x - me.x, (victim.y + 0.9) - (me.y + MC.PHYS.EYE), victim.z - me.z);
-      if (dist > reach || dist < minReach) continue;
-      hits.push(victim);
+      if (victim && victim.alive && victim.id !== me.id) {
+        const dist = Math.hypot(victim.x - me.x, (victim.y + 0.9) - (me.y + MC.PHYS.EYE), victim.z - me.z);
+        if (dist <= reach && dist >= minReach) hits.push(victim);
+        continue;
+      }
+      const w = wolves.get(id);
+      if (w && w.alive) {
+        const dist = Math.hypot(w.x - me.x, (w.y + 0.5) - (me.y + MC.PHYS.EYE), w.z - me.z);
+        if (dist <= reach && dist >= minReach) wolfHits.push(w);
+      }
     }
     // Every other weapon needs an actual target to do anything; the spear's
     // Lunge fires on every swing regardless (a mobility tool as much as a
     // weapon), so only bail out here for a non-spear whiff.
-    if (!hits.length && !isSpear) return;
+    if (!hits.length && !wolfHits.length && !isSpear) return;
     me.lastAttack = t;
 
     let dmg = item.damage || 1;
@@ -2018,7 +2177,17 @@ io.on('connection', socket => {
       if (hasEnchant(me, 'stick', 'knockback5')) kbMul += C.STICK_KB5_ADD;
       else if (hasEnchant(me, 'stick', 'knockback2')) kbMul += C.STICK_KB2_ADD;
     }
-    if (charged) dmg *= C.SPEAR_CHARGE_DMG_MULT;
+    if (charged) {
+      dmg *= C.SPEAR_CHARGE_DMG_MULT;
+      // Jousting bonus: extra damage scaled off how fast the wielder is
+      // actually moving horizontally the instant the thrust lands (sprinting
+      // or mid-Lunge-dash) - a charge held standing still gets none of this,
+      // only the flat multiplier above.
+      const speed = Math.hypot(me.vx, me.vz);
+      if (speed > C.SPEAR_CHARGE_MIN_SPEED) {
+        dmg += Math.min(C.SPEAR_CHARGE_MAX_SPEED_BONUS, (speed - C.SPEAR_CHARGE_MIN_SPEED) * C.SPEAR_CHARGE_SPEED_DMG_PER_UNIT);
+      }
+    }
     if (me.sprint) kbMul += 0.5;
 
     const fireAspect = weaponKey === 'sword' && hasEnchant(me, 'sword', 'fireAspect');
@@ -2030,9 +2199,11 @@ io.on('connection', socket => {
       applyDamage(victim, victimDmg, me, weaponKey, (dx / l) * 0.55 * kbMul, (dz / l) * 0.55 * kbMul, 0.42);
       if (fireAspect) ignitePlayer(victim, t);
     }
-    if (crit && hits.length) io.emit('effect', { kind: 'crit', x: hits[0].x, y: hits[0].y + 1, z: hits[0].z });
+    for (const w of wolfHits) damageWolf(w, dmg, me);
+    const firstHit = hits[0] || wolfHits[0];
+    if (crit && firstHit) io.emit('effect', { kind: 'crit', x: firstHit.x, y: firstHit.y + 1, z: firstHit.z });
     if (smash) {
-      io.emit('effect', { kind: 'smash', x: hits[0].x, y: hits[0].y + 0.2, z: hits[0].z });
+      io.emit('effect', { kind: 'smash', x: firstHit.x, y: firstHit.y + 0.2, z: firstHit.z });
       // Wind Burst III: launch the wielder back into the air so a smash can
       // be chained, and waive whatever fall damage this landing would've
       // otherwise dealt (same as vanilla). smashPeak will naturally re-track
@@ -2051,6 +2222,22 @@ io.on('connection', socket => {
       me.vx += lvx; me.vz += lvz;
       socket.emit('launch', { vx: lvx, vz: lvz });
     }
+  });
+
+  // Right-click a Wolf Spawn Egg to spawn a wolf loyal only to you (see
+  // spawnWolf/stepWolf) - no aiming needed, it appears a couple blocks in
+  // front of wherever you're facing.
+  socket.on('spawnWolf', () => {
+    if (!me || !me.alive) return;
+    const item = itemForPlayer(me, me.slot);
+    if (!item || item.type !== 'spawn_egg') return;
+    const t = now();
+    if (t - (me.lastWolfEgg || 0) < item.cooldown) return;
+    if ((me.ammo.wolf_spawn_egg || 0) <= 0) return;
+    me.lastWolfEgg = t;
+    me.ammo.wolf_spawn_egg--;
+    socket.emit('ammo', me.ammo);
+    spawnWolf(me, me.dogArmor);
   });
 
   socket.on('shoot', d => {

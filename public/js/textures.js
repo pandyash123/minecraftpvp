@@ -527,8 +527,13 @@
   // this is drawn as its own inflated box shell over the body (see
   // MCEntities.armorParts / Renderer.drawArmorLayer), not a tint on the
   // skin, so it reads as "wearing plates" rather than "recolored".
-  const ARMOR_COLORS = { leather: '#8a5a2e', iron: '#d3d5d8', diamond: '#3fd0c9', netherite: '#17161a' };
-  const ARMOR_FLECKS = { leather: '#c9915a', iron: '#ffffff', diamond: '#c8fff9', netherite: '#6a5a52' };
+  // wolf_fur/dog_armor aren't armor tiers at all, but they're drawn the
+  // exact same way (a flat material color box shell - see
+  // MCEntities.wolfParts/Renderer.drawWolf) so they just ride this same
+  // palette + createArmorTexture()/getArmorTexture() cache instead of
+  // needing a separate texture system.
+  const ARMOR_COLORS = { leather: '#8a5a2e', iron: '#d3d5d8', diamond: '#3fd0c9', netherite: '#17161a', wolf_fur: '#8a7a68', dog_armor: '#5a6a72' };
+  const ARMOR_FLECKS = { leather: '#c9915a', iron: '#ffffff', diamond: '#c8fff9', netherite: '#6a5a52', wolf_fur: '#c9c0a8', dog_armor: '#8a9aa2' };
   function paintArmor(tier) {
     const cv = document.createElement('canvas');
     cv.width = cv.height = 64;
@@ -1021,6 +1026,21 @@
       g.fillStyle = '#7de3e0';
       g.fillRect(S * 0.46, S * 0.36, S * 0.03, S * 0.03);
       g.fillRect(S * 0.51, S * 0.36, S * 0.03, S * 0.03);
+    } else if (key === 'wolf_spawn_egg') {
+      // Classic vanilla spawn-egg look: an egg-shaped base color (wolf fur
+      // grey-brown) with a speckled pattern in a contrasting color (the
+      // fur's darker patches) instead of a solid fill.
+      g.fillStyle = '#c9bda8';
+      g.beginPath();
+      g.ellipse(S * 0.5, S * 0.56, S * 0.28, S * 0.36, 0, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = '#7a6a58';
+      const spots = [[0.42, 0.4], [0.58, 0.46], [0.46, 0.62], [0.6, 0.68], [0.38, 0.58], [0.52, 0.32]];
+      for (const [sx, sy] of spots) {
+        g.beginPath();
+        g.ellipse(S * sx, S * sy, S * 0.06, S * 0.05, 0.4, 0, Math.PI * 2);
+        g.fill();
+      }
     } else if (key === 'elytra') {
       // A pair of angular wings, mirrored either side of a small spine.
       const wing = (sign) => {

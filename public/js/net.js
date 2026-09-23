@@ -14,7 +14,7 @@
     on(evt, fn) { (this.handlers[evt] = this.handlers[evt] || []).push(fn); return this; }
     emit2(evt, data) { (this.handlers[evt] || []).forEach(fn => fn(data)); }
 
-    connect(name, kit, customItems, enchantOpts, armor, swordTier, axeTier) {
+    connect(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor) {
       return new Promise((resolve, reject) => {
         const socket = io({ transports: ['websocket', 'polling'] });
         this.socket = socket;
@@ -22,7 +22,7 @@
 
         socket.on('connect', () => {
           this.connected = true;
-          socket.emit('join', { name, kit, customItems, enchantOpts, armor, swordTier, axeTier }, () => {
+          socket.emit('join', { name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor }, () => {
             clearTimeout(timeout);
           });
         });
@@ -33,7 +33,7 @@
         const events = ['playerJoin', 'playerLeave', 'spawned', 'respawn', 'teleport', 'hurt', 'heal',
           'killreward', 'hp', 'death', 'block', 'snapshot', 'projectile', 'projectileGone', 'swing',
           'hitmarker', 'arrowHit', 'effect', 'scores', 'chat', 'ammo', 'shieldStun', 'launch',
-          'effects', 'weather', 'elytraUnlocked'];
+          'effects', 'weather', 'elytraUnlocked', 'wolfSpawn', 'wolfHp', 'wolfDeath', 'wolfTeleport'];
         for (const e of events) socket.on(e, data => this.emit2(e, data));
 
         socket.on('disconnect', reason => this.emit2('disconnected', reason));
@@ -77,6 +77,7 @@
     hitCrystal(x, y, z) { if (this.socket) this.socket.emit('hitCrystal', { x, y, z }); }
     chargeAnchor(x, y, z) { if (this.socket) this.socket.emit('chargeAnchor', { x, y, z }); }
     hitAnchor(x, y, z) { if (this.socket) this.socket.emit('hitAnchor', { x, y, z }); }
+    spawnWolf() { if (this.socket) this.socket.emit('spawnWolf'); }
     chat(text) { if (this.socket) this.socket.emit('chat', text); }
   }
 

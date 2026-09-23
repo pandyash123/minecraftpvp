@@ -39,6 +39,7 @@
         pauseMenu: el('pauseMenu'), resumeBtn: el('resumeBtn'), leaveBtn: el('leaveBtn'),
         customLoadoutCheck: el('customLoadoutCheck'), customItemsList: el('customItemsList'),
         netheriteArmorCheck: el('netheriteArmorCheck'), netheriteSwordCheck: el('netheriteSwordCheck'), netheriteAxeCheck: el('netheriteAxeCheck'),
+        dogArmorCheck: el('dogArmorCheck'),
         enchantList: el('enchantList'),
         effectsBar: el('effectsBar')
       };
@@ -52,6 +53,7 @@
 
       this.me = null;               // {id, x,y,z,vx,vy,vz,yaw,pitch,onGround,...}
       this.remote = new Map();      // id -> remote player render state
+      this.wolves = new Map();      // id -> {id, ownerId, name, x,y,z,yaw, health, maxHealth, alive, hasArmor}
       this.projectiles = new Map();
       this.particlesMeta = [];      // {x,y,z,vx,vy,vz,r,g,b,a,size,life}
       this._groundFires = [];       // {x,y,z,until} - cosmetic only, see 'groundfire' effect
@@ -257,10 +259,11 @@
       const armor = this.hud.netheriteArmorCheck && this.hud.netheriteArmorCheck.checked ? 'netherite' : 'diamond';
       const swordTier = this.hud.netheriteSwordCheck && this.hud.netheriteSwordCheck.checked ? 'netherite' : 'diamond';
       const axeTier = this.hud.netheriteAxeCheck && this.hud.netheriteAxeCheck.checked ? 'netherite' : 'diamond';
+      const dogArmor = !!(this.hud.dogArmorCheck && this.hud.dogArmorCheck.checked);
       this.hud.menu.classList.add('hidden');
       this.hud.loading.classList.remove('hidden');
       global.MCSound.resume();
-      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier).catch(err => {
+      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor).catch(err => {
         console.error(err);
         this.hud.loading.classList.add('hidden');
         this.hud.menu.classList.remove('hidden');
@@ -268,7 +271,7 @@
       });
     }
 
-    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier) {
+    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor) {
       // Drives the armor-piece icon color in the inventory (see
       // _buildInventoryUI/_renderChestSlot) - the human player's own tier
       // isn't part of `this.me` (only remote players carry .armor, from
@@ -280,7 +283,7 @@
       // speed) - combat-relevant enchants are already re-validated server-side
       // regardless of what this holds.
       this.myEnchants = enchantOpts || MC.defaultEnchantOpts();
-      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier);
+      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor);
       this.world = new global.MCWorld(init.seed);
       this.world.applyEdits(init.edits || []);
       // The WebGL context (and everything already uploaded into it - block
@@ -441,6 +444,14 @@
           const tag = this._tags.get(d.id);
           if (tag) { tag.node.remove(); this._tags.delete(d.id); }
         }
+      });
+      net.on('wolfSpawn', w => { this.wolves.set(w.id, w); });
+      net.on('wolfHp', d => { const w = this.wolves.get(d.id); if (w) w.health = d.health; });
+      net.on('wolfTeleport', d => { const w = this.wolves.get(d.id); if (w) { w.x = d.x; w.y = d.y; w.z = d.z; } });
+      net.on('wolfDeath', d => {
+        this.wolves.delete(d.id);
+        // Same nametag-cleanup need as a player/bot leaving - see playerLeave above.
+        if (this._tags) { const tag = this._tags.get(d.id); if (tag) { tag.node.remove(); this._tags.delete(d.id); } }
       });
       net.on('chat', m => this._log(m.system ? m.text : (m.name + ': ' + m.text), m.system));
       net.on('scores', s => {
@@ -609,6 +620,19 @@
         pr.correctX = x; pr.correctY = y; pr.correctZ = z;
         pr.vx = vx; pr.vy = vy; pr.vz = vz;
         pr.snapT = now;
+      }
+
+      // Wolves ride the same high-frequency snapshot for position (see
+      // sendSnapshot in server.js) - state changes (spawn/health/death/
+      // teleport) arrive as their own one-off events instead, handled in
+      // _wireNetEvents. No interpolation smoothing yet, just direct
+      // position updates - acceptable at a wolf's walking pace.
+      if (s.w) {
+        for (const row of s.w) {
+          const [id, x, y, z, yaw] = row;
+          const w = this.wolves.get(id);
+          if (w) { w.x = x; w.y = y; w.z = z; w.yaw = yaw; }
+        }
       }
     }
 
@@ -1220,6 +1244,17 @@
         // clamped straight back down to the same slow plain-glide ceiling.
         this._boostedUntil = performance.now() / 1000 + C.ELYTRA_BOOST_WINDOW;
         global.MCSound.fireworkLaunch();
+      } else if (item.type === 'spawn_egg') {
+        // No aiming needed - the server places it a couple blocks in front
+        // of wherever you're facing (see spawnWolf in server.js). Ammo is
+        // decremented server-side (it also owns the cooldown), mirrored
+        // back here on the 'ammo' event like every other consumable.
+        const t = performance.now();
+        if (this.ammo.wolf_spawn_egg <= 0 || t - (this._lastWolfEggAt || 0) < item.cooldown * 1000) return;
+        this._lastWolfEggAt = t;
+        this.net.spawnWolf();
+        this._swingLocal();
+        global.MCSound.click();
       }
       // bow charging is handled continuously in update() via rightDownAt
     }
@@ -2227,6 +2262,17 @@
         if (p.swingT !== undefined && p.swingT >= 0 && p.swingT < 0.001) p.swingT = 0.001;
         if (p.swingT > 0.4) p.swingT = -1;
       }
+      // wolves - same fog-distance skip as remote players above, and
+      // _drawNameTag() is reused as-is (it only needs x/y/z/name/health).
+      for (const w of this.wolves.values()) {
+        if (Math.hypot(w.x - eye[0], w.y - eye[1], w.z - eye[2]) > fogFar) {
+          const tag = this._tags && this._tags.get(w.id);
+          if (tag) tag.node.style.display = 'none';
+          continue;
+        }
+        r.drawWolf(w.x, w.y, w.z, w.yaw, w.hasArmor);
+        this._drawNameTag(w);
+      }
       if (this._damageNumbers && this._damageNumbers.length) this._drawDamageNumbers();
 
       // projectiles
@@ -2477,6 +2523,7 @@
     if (item.type === 'block' && item.ammo !== undefined) return item.name + ': ' + ammo[item.key];
     if (item.type === 'totem') return 'Totems: ' + ammo.totem;
     if (item.type === 'firework') return 'Fireworks: ' + ammo.firework;
+    if (item.type === 'spawn_egg') return 'Wolf Spawn Eggs: ' + ammo.wolf_spawn_egg;
     return '';
   }
 

@@ -115,6 +115,30 @@
     };
   }
 
+  /**
+   * A simple blocky quadruped - body, head, tail and 4 legs, all sharing
+   * one pivot (shoulder height, on top of the legs) except the legs
+   * themselves which pivot from the ground up. Rendered with a flat-color
+   * texture (see textures.js's createWolfTexture, same trick as
+   * armorParts()'s flat material colors) rather than a painted skin, so
+   * the UV rects below are pure bookkeeping - any rect samples the same
+   * color regardless of which part it's assigned to.
+   */
+  function wolfParts() {
+    const P = TX.SKIN_PARTS;
+    const LEG_H = 8; // pixels
+    const body = [0, LEG_H * S, 0];
+    return {
+      body: { geo: box(8, 8, 12, -4, 0, -6, P.body), pivot: body },
+      head: { geo: box(6, 6, 6, -3, 1, -12, P.head), pivot: body },
+      tail: { geo: box(3, 3, 6, -1.5, 2, 6, P.legR), pivot: body },
+      legFR: { geo: box(3, LEG_H, 3, -1.5, -LEG_H, -1.5, P.legR), pivot: [-3 * S, LEG_H * S, -4 * S] },
+      legFL: { geo: box(3, LEG_H, 3, -1.5, -LEG_H, -1.5, P.legL), pivot: [3 * S, LEG_H * S, -4 * S] },
+      legBR: { geo: box(3, LEG_H, 3, -1.5, -LEG_H, -1.5, P.legR), pivot: [-3 * S, LEG_H * S, 4 * S] },
+      legBL: { geo: box(3, LEG_H, 3, -1.5, -LEG_H, -1.5, P.legL), pivot: [3 * S, LEG_H * S, 4 * S] }
+    };
+  }
+
   /** Simple textured quad in the XY plane, centred on the origin. */
   function quadGeo(w, h) {
     const x = w / 2, y = h / 2;
@@ -218,5 +242,5 @@
     return { vertices: new Float32Array(verts), count: verts.length / 3 };
   }
 
-  global.MCEntities = { playerParts, armorParts, quadGeo, arrowGeo, blockCubeGeo, cubeWireGeo, chargeGeo, box, S };
+  global.MCEntities = { playerParts, armorParts, wolfParts, quadGeo, arrowGeo, blockCubeGeo, cubeWireGeo, chargeGeo, box, S };
 })(window);
