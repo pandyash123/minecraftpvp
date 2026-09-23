@@ -220,6 +220,14 @@
       // Held-item icons for remote players (see drawHeldItem below).
       this.iconTex = new Map();
       this.itemQuadVAO = buildIconQuadVAO(gl);
+      // Custom-trim textures (see getCustomArmorTexture/getShieldTexture),
+      // keyed by the trim array's own reference rather than a player id -
+      // a WeakMap means an old texture is simply dropped by the GC once
+      // nothing (no remote-player entry) references that trim array anymore
+      // (e.g. after the owner disconnects), no manual cleanup needed.
+      this.customArmorTex = new WeakMap();
+      this.shieldTex = new WeakMap();
+      this.defaultShieldTex = null;
       this._armRMatrix = M4.create();
       this._haveArmR = false;
 
@@ -250,6 +258,29 @@
     getArmorTexture(tier) {
       let t = this.armorTex.get(tier);
       if (!t) { t = global.MCTextures.createArmorTexture(this.gl, tier); this.armorTex.set(tier, t); }
+      return t;
+    }
+
+    /** Same as getArmorTexture, but stamped with a player-painted trim (see
+     * MC.isValidTrim) - cached per trim array rather than per tier, since
+     * every player with a trim gets their own one-off texture. */
+    getCustomArmorTexture(tier, trim) {
+      let t = this.customArmorTex.get(trim);
+      if (!t) { t = global.MCTextures.createArmorTexture(this.gl, tier, trim); this.customArmorTex.set(trim, t); }
+      return t;
+    }
+
+    /** A shield icon big enough to actually show a painted trim (see
+     * SHIELD_ICON_SIZE), rendered at native size rather than the standard
+     * 32px hotbar icon - default (no trim) is cached once and shared. */
+    getShieldTexture(trim) {
+      const size = global.MCTextures.SHIELD_ICON_SIZE;
+      if (!MC.isValidTrim(trim)) {
+        if (!this.defaultShieldTex) this.defaultShieldTex = uploadIconTex(this.gl, global.MCTextures.itemIcon('shield', size));
+        return this.defaultShieldTex;
+      }
+      let t = this.shieldTex.get(trim);
+      if (!t) { t = uploadIconTex(this.gl, global.MCTextures.itemIcon('shield', size, null, trim)); this.shieldTex.set(trim, t); }
       return t;
     }
 
@@ -427,13 +458,13 @@
      * geometry worn over the body, not a tint on the skin. No-ops for
      * armorTier 'none'/falsy.
      */
-    drawArmorLayer(armorTier, x, y, z, yaw, pose) {
+    drawArmorLayer(armorTier, x, y, z, yaw, pose, trim) {
       if (!armorTier || armorTier === 'none') return;
       const gl = this.gl;
       gl.useProgram(this.progEntity);
       gl.uniformMatrix4fv(this.progEntity.u.uVP, false, this.viewProj);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.getArmorTexture(armorTier));
+      gl.bindTexture(gl.TEXTURE_2D, MC.isValidTrim(trim) ? this.getCustomArmorTexture(armorTier, trim) : this.getArmorTexture(armorTier));
       gl.uniform1i(this.progEntity.u.uTex, 0);
       gl.uniform3fv(this.progEntity.u.uTint, [1, 1, 1]);
       gl.uniform1f(this.progEntity.u.uAlpha, 1);
@@ -516,11 +547,12 @@
     /** Draws a small item icon hanging off the swing arm from the most
      * recent drawPlayer() call - lets you tell what a remote player/bot is
      * actually holding without a full 3D held-item model. */
-    drawHeldItem(tex) {
+    drawHeldItem(tex, scale) {
       if (!this._haveArmR) return;
       const gl = this.gl;
+      const s = scale || 0.4;
       const local = M4.create();
-      M4.fromTRS(local, 0, -0.55, 0.1, 0, 0, 0, 0.4, 0.4, 0.4);
+      M4.fromTRS(local, 0, -0.55, 0.1, 0, 0, 0, s, s, s);
       const model = M4.create();
       M4.multiply(model, this._armRMatrix, local);
       gl.useProgram(this.progEntity);

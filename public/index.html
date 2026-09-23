@@ -26,7 +26,10 @@
       <div class="slot" id="offhandSlot" title="Off-hand (empty)"><span class="slotlabel">Off-hand</span></div>
       <div id="hotbar"></div>
     </div>
-    <div id="stats"><span id="fps">0 fps</span><span id="pingText">0 ms</span></div>
+    <div id="stats">
+      <button id="viewModeBtn" type="button" title="Change camera view (F5)">1st Person</button>
+      <span id="fps">0 fps</span><span id="pingText">0 ms</span>
+    </div>
     <div id="killfeed"></div>
     <div id="chatWrap">
       <div id="chatLog"></div>
@@ -71,6 +74,35 @@
         <div class="invrow" id="invHotbar"></div>
       </div>
       <div class="invhint">Press E or Esc to close</div>
+    </div>
+  </div>
+
+  <div id="trimEditor" class="hidden">
+    <div class="panel trimpanel">
+      <h1>Customize Trims</h1>
+      <p class="sub">Paint a pattern onto your armor or shield - saved automatically in this browser, no need to re-import it next time.</p>
+      <div class="trimTabs">
+        <button type="button" class="trimTab active" id="trimTabArmor" data-target="armor">Armor</button>
+        <button type="button" class="trimTab" id="trimTabShield" data-target="shield">Shield</button>
+      </div>
+      <div class="trimBody">
+        <canvas id="trimCanvas" width="320" height="320"></canvas>
+        <div class="trimControls">
+          <div class="trimLabel">Color</div>
+          <div class="trimPalette" id="trimPalette"></div>
+          <div class="trimLabel">Brush size</div>
+          <div class="trimBrushRow" id="trimBrushRow">
+            <button type="button" class="brushBtn active" data-size="1">1</button>
+            <button type="button" class="brushBtn" data-size="2">2</button>
+            <button type="button" class="brushBtn" data-size="4">4</button>
+          </div>
+          <button type="button" id="trimClearBtn" class="secondary">Clear</button>
+          <button type="button" id="trimExportBtn" class="secondary">Export to File</button>
+          <button type="button" id="trimImportBtn" class="secondary">Import from File</button>
+          <input type="file" id="trimImportInput" accept="application/json" class="hidden">
+        </div>
+      </div>
+      <button type="button" id="trimCloseBtn">Done</button>
     </div>
   </div>
 
@@ -136,6 +168,7 @@
       <label class="checkline"><input type="checkbox" id="atkDummyCheck"> Add an attacking dummy (fixed facing, fights back with whatever weapon last hit it)</label>
       <label class="checkline"><input type="checkbox" id="dmgNumbersCheck"> Show damage numbers when your weapon lands a hit</label>
       <button id="playBtn">Play</button>
+      <button id="trimsBtn" type="button" class="secondary">Customize Armor &amp; Shield Trims</button>
       <button id="resetTerrainBtn" type="button" class="secondary">Reset Terrain</button>
       <div id="resetTerrainMsg" class="hidden"></div>
       <div class="controls">
@@ -144,7 +177,7 @@
         hold Right click with sword/pickaxe/axe to raise your shield (blocks what's in front of you, but not hits from well above or below) &middot;
         the axe hits harder, and its first hit through a raised shield still gets blocked but disables that shield for 3s &middot;
         bots can wear a shield down too - repeated blocked hits in a row disable it (3 on Easy, 2 on Normal, 1 on Hard) &middot;
-        1-9 / scroll wheel switch item &middot; E inventory (drag items to/from your backpack) &middot; Enter chat &middot; Esc pause / release mouse
+        1-9 / scroll wheel switch item &middot; E inventory (drag items to/from your backpack) &middot; F5 or the view button cycles 1st/3rd person &middot; Enter chat &middot; Esc pause / release mouse
         <br><br><b>Commands</b> &mdash; /bots &lt;0-16&gt; [difficulty] [armor] [kit] [weapon] &middot; /difficulty &lt;easy|normal|hard|random&gt; &middot;
         /botarmor &lt;none|leather|iron|diamond&gt; &middot; /botkit &lt;sword|axe|web&gt; &middot; /botweapon &lt;fixed|versatile|full&gt; &middot;
         /botteam &lt;on|off&gt; &middot; /kit &lt;sword|axe|web&gt; &middot; /botdiff &lt;bot name&gt; &lt;level&gt; &middot;

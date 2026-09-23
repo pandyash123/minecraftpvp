@@ -27,7 +27,7 @@
         chatLog: el('chatLog'), chatInput: el('chatInput'),
         deathScreen: el('deathScreen'), deathText: el('deathText'), respawnTimer: el('respawnTimer'),
         crosshair: el('crosshair'), hint: el('hint'), loading: el('loading'), loadingBar: el('loadingBar'),
-        killfeed: el('killfeed'), ammo: el('ammoText'), fps: el('fps'), ping: el('pingText'),
+        killfeed: el('killfeed'), ammo: el('ammoText'), fps: el('fps'), ping: el('pingText'), viewModeBtn: el('viewModeBtn'),
         chargeWrap: el('chargeWrap'), chargeFill: el('chargeFill'),
         menu: el('menu'), nameInput: el('nameInput'), playBtn: el('playBtn'), botsInput: el('botsInput'),
         kitSelect: el('kitSelect'), botKitSelect: el('botKitSelect'),
@@ -41,7 +41,11 @@
         netheriteArmorCheck: el('netheriteArmorCheck'), netheriteSwordCheck: el('netheriteSwordCheck'), netheriteAxeCheck: el('netheriteAxeCheck'),
         dogArmorCheck: el('dogArmorCheck'),
         enchantList: el('enchantList'),
-        effectsBar: el('effectsBar')
+        effectsBar: el('effectsBar'),
+        trimsBtn: el('trimsBtn'), trimEditor: el('trimEditor'), trimCanvas: el('trimCanvas'),
+        trimTabArmor: el('trimTabArmor'), trimTabShield: el('trimTabShield'), trimPalette: el('trimPalette'),
+        trimBrushRow: el('trimBrushRow'), trimClearBtn: el('trimClearBtn'), trimExportBtn: el('trimExportBtn'),
+        trimImportBtn: el('trimImportBtn'), trimImportInput: el('trimImportInput'), trimCloseBtn: el('trimCloseBtn')
       };
       this.inventoryOpen = false;
       this.heartNodes = []; // cached <canvas> elements so we only redraw what changed
@@ -132,6 +136,7 @@
       this.hud.resetTerrainBtn.addEventListener('click', () => this._resetTerrainFromMenu());
       this._buildCustomItemsMenu();
       this._buildEnchantMenu();
+      this._wireTrimEditor();
     }
 
     /**
@@ -176,6 +181,153 @@
         (out[box.dataset.slot] || (out[box.dataset.slot] = {}))[box.dataset.key] = box.checked;
       }
       return out;
+    }
+
+    /**
+     * The pixel-art armor/shield trim editor, opened from the main menu.
+     * Fully self-contained: two 16x16 color-index grids (armor/shield),
+     * auto-saved to localStorage on every stroke (see loadTrim/saveTrim) so
+     * a returning player's trim just applies without re-importing anything,
+     * plus an explicit export/import round-trip through a downloaded .json
+     * file for moving a trim to another browser or device.
+     */
+    _wireTrimEditor() {
+      const hud = this.hud;
+      if (!hud.trimsBtn) return;
+      const GRID = MC.TRIM_GRID;
+      const CELL = hud.trimCanvas.width / GRID; // 320/16 = 20px/cell
+      const ctx = hud.trimCanvas.getContext('2d');
+      this._trimGrids = { armor: null, shield: null };
+      this._trimTarget = 'armor';
+      this._trimColor = 1; // index into MC.TRIM_PALETTE - starts on the first real color
+      this._trimBrush = 1;
+
+      const blank = () => new Array(MC.TRIM_CELLS).fill(0);
+      const keyFor = target => target === 'shield' ? 'mcpvp_shieldTrim' : 'mcpvp_armorTrim';
+      const gridFor = target => this._trimGrids[target] || (this._trimGrids[target] = loadTrim(keyFor(target)) || blank());
+
+      const draw = () => {
+        const grid = gridFor(this._trimTarget);
+        ctx.clearRect(0, 0, hud.trimCanvas.width, hud.trimCanvas.height);
+        for (let ty = 0; ty < GRID; ty++) {
+          for (let tx = 0; tx < GRID; tx++) {
+            const idx = grid[ty * GRID + tx];
+            // A faint checkerboard for "no paint" cells - same idea as any
+            // image editor's transparency grid, so an empty cell reads as
+            // "nothing painted here" rather than looking like solid black.
+            ctx.fillStyle = idx ? MC.TRIM_PALETTE[idx] : ((tx + ty) % 2 ? '#3a3a3a' : '#333');
+            ctx.fillRect(tx * CELL, ty * CELL, CELL, CELL);
+          }
+        }
+      };
+
+      // Palette swatches, built straight from MC.TRIM_PALETTE (index 0 gets
+      // its own "eraser" swatch instead of a color chip).
+      hud.trimPalette.innerHTML = '';
+      for (let i = 0; i < MC.TRIM_PALETTE.length; i++) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'trimSwatch' + (i === 0 ? ' eraser' : '') + (i === this._trimColor ? ' active' : '');
+        if (i > 0) btn.style.background = MC.TRIM_PALETTE[i];
+        btn.title = i === 0 ? 'Eraser' : 'Color ' + i;
+        btn.addEventListener('click', () => {
+          this._trimColor = i;
+          hud.trimPalette.querySelectorAll('.trimSwatch').forEach(s => s.classList.remove('active'));
+          btn.classList.add('active');
+        });
+        hud.trimPalette.appendChild(btn);
+      }
+
+      hud.trimBrushRow.querySelectorAll('.brushBtn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          this._trimBrush = parseInt(btn.dataset.size, 10) || 1;
+          hud.trimBrushRow.querySelectorAll('.brushBtn').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+        });
+      });
+
+      const setTarget = target => {
+        this._trimTarget = target;
+        hud.trimTabArmor.classList.toggle('active', target === 'armor');
+        hud.trimTabShield.classList.toggle('active', target === 'shield');
+        draw();
+      };
+      hud.trimTabArmor.addEventListener('click', () => setTarget('armor'));
+      hud.trimTabShield.addEventListener('click', () => setTarget('shield'));
+
+      // Paints a brush-sized square of cells centered on (cx,cy), clipped to
+      // the grid edges - "diameter N" meaning an NxN block of cells, same
+      // brush-size request as the palette above.
+      const paintAt = (cx, cy) => {
+        const grid = gridFor(this._trimTarget);
+        const half = (this._trimBrush - 1) / 2;
+        const x0 = Math.round(cx - half), y0 = Math.round(cy - half);
+        for (let dy = 0; dy < this._trimBrush; dy++) {
+          for (let dx = 0; dx < this._trimBrush; dx++) {
+            const x = x0 + dx, y = y0 + dy;
+            if (x < 0 || y < 0 || x >= GRID || y >= GRID) continue;
+            grid[y * GRID + x] = this._trimColor;
+          }
+        }
+        draw();
+      };
+      let painting = false;
+      const cellFromEvent = e => {
+        const rect = hud.trimCanvas.getBoundingClientRect();
+        const px = (e.clientX - rect.left) / rect.width * hud.trimCanvas.width;
+        const py = (e.clientY - rect.top) / rect.height * hud.trimCanvas.height;
+        return [Math.floor(px / CELL), Math.floor(py / CELL)];
+      };
+      hud.trimCanvas.addEventListener('mousedown', e => { painting = true; paintAt(...cellFromEvent(e)); });
+      hud.trimCanvas.addEventListener('mousemove', e => { if (painting) paintAt(...cellFromEvent(e)); });
+      window.addEventListener('mouseup', () => {
+        if (!painting) return;
+        painting = false;
+        // Auto-save on stroke release, not on the menu's Play click - this
+        // is a standalone editor, so closing/switching tabs never loses
+        // whatever was just painted.
+        saveTrim(keyFor(this._trimTarget), this._trimGrids[this._trimTarget]);
+      });
+
+      hud.trimClearBtn.addEventListener('click', () => {
+        this._trimGrids[this._trimTarget] = blank();
+        saveTrim(keyFor(this._trimTarget), this._trimGrids[this._trimTarget]);
+        draw();
+      });
+
+      hud.trimExportBtn.addEventListener('click', () => {
+        // Bundles both grids into one file regardless of which tab is open -
+        // a single download that's a complete backup of everything painted.
+        const payload = { armorTrim: gridFor('armor'), shieldTrim: gridFor('shield') };
+        const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'mc-pvp-trims.json';
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+      });
+
+      hud.trimImportBtn.addEventListener('click', () => hud.trimImportInput.click());
+      hud.trimImportInput.addEventListener('change', () => {
+        const file = hud.trimImportInput.files[0];
+        hud.trimImportInput.value = '';
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const data = JSON.parse(reader.result);
+            let imported = 0;
+            if (MC.isValidTrim(data.armorTrim)) { this._trimGrids.armor = data.armorTrim; saveTrim(keyFor('armor'), data.armorTrim); imported++; }
+            if (MC.isValidTrim(data.shieldTrim)) { this._trimGrids.shield = data.shieldTrim; saveTrim(keyFor('shield'), data.shieldTrim); imported++; }
+            if (!imported) { alert('That file has no valid armor/shield trim in it.'); return; }
+            draw();
+          } catch (e) { alert('Could not read that file as a trim export.'); }
+        };
+        reader.readAsText(file);
+      });
+
+      hud.trimsBtn.addEventListener('click', () => { setTarget('armor'); hud.trimEditor.classList.remove('hidden'); });
+      hud.trimCloseBtn.addEventListener('click', () => hud.trimEditor.classList.add('hidden'));
     }
 
     /**
@@ -260,10 +412,16 @@
       const swordTier = this.hud.netheriteSwordCheck && this.hud.netheriteSwordCheck.checked ? 'netherite' : 'diamond';
       const axeTier = this.hud.netheriteAxeCheck && this.hud.netheriteAxeCheck.checked ? 'netherite' : 'diamond';
       const dogArmor = !!(this.hud.dogArmorCheck && this.hud.dogArmorCheck.checked);
+      // Trims are edited from their own panel (see _wireTrimEditor), not
+      // this menu form - they're read straight from localStorage here so
+      // whatever was last saved just applies, no re-import needed each
+      // session (see loadTrim()).
+      const armorTrim = loadTrim('mcpvp_armorTrim');
+      const shieldTrim = loadTrim('mcpvp_shieldTrim');
       this.hud.menu.classList.add('hidden');
       this.hud.loading.classList.remove('hidden');
       global.MCSound.resume();
-      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor).catch(err => {
+      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, armorTrim, shieldTrim).catch(err => {
         console.error(err);
         this.hud.loading.classList.add('hidden');
         this.hud.menu.classList.remove('hidden');
@@ -271,19 +429,24 @@
       });
     }
 
-    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor) {
+    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, armorTrim, shieldTrim) {
       // Drives the armor-piece icon color in the inventory (see
       // _buildInventoryUI/_renderChestSlot) - the human player's own tier
       // isn't part of `this.me` (only remote players carry .armor, from
       // publicPlayer()), so it's tracked here instead.
       this.armorTier = armor === 'netherite' ? 'netherite' : 'diamond';
+      // Same idea as armorTier above - our own trim isn't part of `this.me`
+      // either, so it's tracked here for the third-person self-render and
+      // the shield viewmodel (see render()/_drawViewmodel()).
+      this.myArmorTrim = MC.isValidTrim(armorTrim) ? armorTrim : null;
+      this.myShieldTrim = MC.isValidTrim(shieldTrim) ? shieldTrim : null;
       this._initInventorySlots(kit, customItems, swordTier, axeTier);
       // Kept purely for client-side-only cosmetics/pacing that don't need a
       // server round-trip (currently just the pickaxe's Efficiency V mining
       // speed) - combat-relevant enchants are already re-validated server-side
       // regardless of what this holds.
       this.myEnchants = enchantOpts || MC.defaultEnchantOpts();
-      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor);
+      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, this.myArmorTrim, this.myShieldTrim);
       this.world = new global.MCWorld(init.seed);
       this.world.applyEdits(init.edits || []);
       // The WebGL context (and everything already uploaded into it - block
@@ -294,11 +457,18 @@
       if (!this.renderer) this.renderer = new global.MCRenderer(this.canvas);
 
       this.me = {
-        id: init.id, x: init.spawn.x, y: init.spawn.y, z: init.spawn.z,
+        id: init.id, name, x: init.spawn.x, y: init.spawn.y, z: init.spawn.z,
         vx: 0, vy: 0, vz: 0, yaw: 0, pitch: 0, onGround: true, sneak: false, sprint: false,
         slot: 0, health: C.MAX_HEALTH, absorption: 0, alive: true, blocking: false
       };
+      this.mySkin = null;
       this.yaw = this.me.yaw; this.pitch = 0;
+      // Camera perspective: 0 = first person, 1 = third person (behind,
+      // over-the-shoulder), 2 = third person front (selfie-style, looking
+      // back at your own face) - cycled by F5 or the on-screen button, same
+      // three-way toggle as vanilla Minecraft.
+      this.viewMode = 0;
+      this.selfWalkPhase = 0;
       this.ammo = init.ammo;
       this.weather = init.weather || 'clear';
       this.gliding = false;
@@ -599,7 +769,12 @@
           yaw: p.yaw, pitch: p.pitch, tyaw: p.yaw, tpitch: p.pitch,
           vx: 0, vz: 0, health: p.health, alive: p.alive, slot: p.slot,
           sneak: false, sprint: false, blocking: !!p.blocking, walkPhase: 0, swingT: 0,
-          skin: this.renderer ? this.renderer.getSkin(p.name) : null
+          skin: this.renderer ? this.renderer.getSkin(p.name) : null,
+          // Only ever present on the full publicPlayer() payload (init.players/
+          // playerJoin), never on a bare per-tick snapshot row - see
+          // _applySnapshot, which only ever updates an ALREADY-created entry's
+          // live fields, so this never gets clobbered back to null once set.
+          armorTrim: p.armorTrim || null, shieldTrim: p.shieldTrim || null
         };
         this.remote.set(p.id, r);
       }
@@ -655,6 +830,9 @@
         }
         if (!this.me) return; // no session running (at the menu, or between sessions)
         if (e.code === 'KeyE' && this.me.alive) { e.preventDefault(); this._toggleInventory(); return; }
+        // Same three-way camera cycle as vanilla Minecraft's F5 - block the
+        // browser's own "refresh page" default or every press would reload.
+        if (e.code === 'F5') { e.preventDefault(); this._cyclePerspective(); return; }
         if (this.inventoryOpen) {
           if (e.code === 'Escape') this._toggleInventory();
           return; // swallow movement/hotbar keys while browsing the inventory
@@ -703,6 +881,7 @@
       });
       this.hud.resumeBtn.addEventListener('click', () => this._requestPointerLock());
       this.hud.leaveBtn.addEventListener('click', () => this._leaveToMenu());
+      this.hud.viewModeBtn.addEventListener('click', () => this._cyclePerspective());
       document.addEventListener('mousemove', e => {
         if (!this.pointerLocked) return;
         const sens = 0.0022;
@@ -1322,6 +1501,42 @@
       return [-sy * cp, sp, -cy * cp];
     }
 
+    _cyclePerspective() {
+      this.viewMode = (this.viewMode + 1) % 3;
+      this.hud.viewModeBtn.textContent = ['1st Person', '3rd Person', '3rd Person (Front)'][this.viewMode];
+      global.MCSound.click();
+    }
+
+    /**
+     * Camera eye position + look yaw/pitch for the current view mode. First
+     * person is just the player's own eye, unchanged. Both third-person
+     * modes pull the camera back along a ray from the player's eye (behind
+     * for the over-the-shoulder view, in front for the selfie view) and
+     * raycast against the world so a wall behind/in front of you pulls the
+     * camera in instead of clipping through it - same idea as vanilla MC's
+     * own third-person camera collision.
+     */
+    _computeCamera(eyePos) {
+      if (this.viewMode === 0) return { eye: eyePos, yaw: this.yaw, pitch: this.pitch };
+      const dir = this._lookDir();
+      const back = this.viewMode === 1 ? 1 : -1; // behind you, or out in front of you
+      const wantDist = 4.5;
+      const hit = this.world.raycast(eyePos[0], eyePos[1], eyePos[2], -dir[0] * back, -dir[1] * back, -dir[2] * back, wantDist, false);
+      // Never further than just short of whatever's in the way - a small
+      // floor only to avoid a literal zero-distance camera, not "breathing
+      // room" (raising it further would let the camera clip past a wall
+      // that's closer than the floor). A cramped space still means an
+      // uncomfortably close camera, same tradeoff vanilla Minecraft makes.
+      const dist = hit ? Math.max(0.15, hit.dist - 0.3) : wantDist;
+      const eye = [eyePos[0] - dir[0] * back * dist, eyePos[1] - dir[1] * back * dist, eyePos[2] - dir[2] * back * dist];
+      // Behind-the-shoulder view looks the same direction you do. The front
+      // ("selfie") view instead looks back at your own face - flip yaw 180
+      // degrees and mirror pitch so tilting your look up still tilts the
+      // camera to keep your face framed, not away from it.
+      if (this.viewMode === 1) return { eye, yaw: this.yaw, pitch: this.pitch };
+      return { eye, yaw: this.yaw + Math.PI, pitch: -this.pitch };
+    }
+
     _swingLocal() {
       this.swingT = 0.0001;
       this.net.swing();
@@ -1527,6 +1742,12 @@
         this._updateCharging(nowMs);
         this._sendState();
         this._renderEffectsBar();
+        // Own walk-cycle animation, only actually needed for third-person
+        // self-rendering (see render()) - same speed/sprint-scaled formula
+        // _updateRemotes uses for every other player's walkPhase.
+        const selfSpeed = Math.hypot(this.me.vx || 0, this.me.vz || 0);
+        if (selfSpeed > 0.3 && this.me.onGround) this.selfWalkPhase += dt * (this.me.sprint ? 11 : 8.5);
+        else this.selfWalkPhase *= 0.9;
         // Other clients already see us burning via the snapshot's flags bit
         // (see _updateRemotes) - this is just so it's visible in our own
         // first-person view too.
@@ -2223,7 +2444,9 @@
       const shakeX = this._shakeT > 0 ? (Math.random() - 0.5) * this._shakeT * 0.05 : 0;
       const shakeY = this._shakeT > 0 ? (Math.random() - 0.5) * this._shakeT * 0.05 : 0;
 
-      const eye = [this.me.x, this.me.y + PHYS.EYE + bobOffsetY(this.bobPhase), this.me.z];
+      const eyePos = [this.me.x, this.me.y + PHYS.EYE + bobOffsetY(this.bobPhase), this.me.z];
+      const cam = this._computeCamera(eyePos);
+      const eye = cam.eye;
       const sunAngle = 0.9;
       // Rain/thunder mute and grey everything out, and pull fog in close so
       // visibility actually feels worse - thunder is the darkest of the two.
@@ -2234,10 +2457,22 @@
       const fogNear = wet ? 30 : 60, fogFar = wet ? 75 : 130;
 
       r.resize();
-      r.setCamera(eye, this.yaw + shakeX, this.pitch + shakeY, 78 + (this.mouseDown.right && ITEMS[this.me.slot].type === 'bow' ? -6 : 0));
+      r.setCamera(eye, cam.yaw + shakeX, cam.pitch + shakeY, 78 + (this.mouseDown.right && ITEMS[this.me.slot].type === 'bow' ? -6 : 0));
       r.clear(fogColor[0], fogColor[1], fogColor[2]);
       r.drawSky(skyTop, skyBottom, [1, 0.98, 0.85], [Math.cos(sunAngle) * 0.5, 0.55]);
       r.drawWorld(fogColor, fogNear, fogFar);
+
+      // Third person: draw our own body (never rendered in first person)
+      // exactly like a remote player, at our real position/pose - the
+      // camera itself has already been pulled back/around by _computeCamera.
+      if (this.viewMode !== 0 && this.me.alive) {
+        if (!this.mySkin) this.mySkin = r.getSkin(this.me.name || '');
+        const heldItem = ITEMS[this.me.slot];
+        const pose = poseFor(this.selfWalkPhase, this.swingT, heldItem, this.me.blocking);
+        r.drawPlayer(this.mySkin, this.me.x, this.me.y, this.me.z, this.me.yaw, pose, [1, 1, 1], 1);
+        r.drawArmorLayer(this.armorTier, this.me.x, this.me.y, this.me.z, this.me.yaw, pose, this.myArmorTrim);
+        r.drawHeldItem(this.me.blocking ? r.getShieldTexture(this.myShieldTrim) : r.getIconTexture(heldItem), this.me.blocking ? 0.85 : 0.4);
+      }
 
       // remote players
       for (const p of this.remote.values()) {
@@ -2262,11 +2497,11 @@
         // Real inflated armor geometry worn over the body (see
         // MCEntities.armorParts), not a tint on the skin - drawn as a
         // separate pass right after the body so it layers on top.
-        r.drawArmorLayer(p.armor, p.x, p.y, p.z, p.yaw, pose);
+        r.drawArmorLayer(p.armor, p.x, p.y, p.z, p.yaw, pose, p.armorTrim);
         // So you can tell what a bot/remote player is actually fighting with -
         // and a raised shield takes visual priority over whatever's in the
         // main hand, same as the local first-person viewmodel does.
-        r.drawHeldItem(r.getIconTexture(p.blocking ? MC.SHIELD : heldItem));
+        r.drawHeldItem(p.blocking ? r.getShieldTexture(p.shieldTrim) : r.getIconTexture(heldItem), p.blocking ? 0.85 : 0.4);
         this._drawNameTag(p);
         if (p.swingT !== undefined && p.swingT >= 0 && p.swingT < 0.001) p.swingT = 0.001;
         if (p.swingT > 0.4) p.swingT = -1;
@@ -2321,7 +2556,11 @@
       const camUp = [0, 1, 0];
       r.drawParticles(camRight, camUp);
 
-      this._drawViewmodel(t);
+      // The viewmodel is drawn in a fixed camera-relative space (see its own
+      // comment further down) - only makes sense glued to the lens in first
+      // person. Third person shows the held item on the body model instead
+      // (drawHeldItem above, same as any remote player).
+      if (this.viewMode === 0) this._drawViewmodel(t);
       this._updateDamageFlashDOM();
       this.hud.ammo.textContent = ammoLabel(this.me.slot, this.ammo);
       const offhand = el('offhandSlot');
@@ -2470,12 +2709,21 @@
       } else {
         const key = blocking ? 'shield' : (item.type === 'tool' ? 'pick' : item.key);
         const tex = this._viewIconTex || (this._viewIconTex = {});
-        if (!tex[key]) tex[key] = uploadCanvasTex(gl, global.MCTextures.itemIcon(key, 64));
+        // A raised shield gets a much higher-res canvas than a normal item
+        // icon - it's rendered far bigger both here and out in the world
+        // (drawHeldItem's scale), so a painted trim actually has enough
+        // pixels to read clearly instead of blurring. The trim itself is
+        // fixed for the whole session (chosen at the menu, see start()), so
+        // this cache never needs to invalidate mid-match.
+        if (!tex[key]) {
+          const size = blocking ? global.MCTextures.SHIELD_ICON_SIZE : 64;
+          tex[key] = uploadCanvasTex(gl, global.MCTextures.itemIcon(key, size, null, blocking ? this.myShieldTrim : null));
+        }
         const vao = this._viewQuad || (this._viewQuad = quadVAO(gl));
         gl.useProgram(r.progEntity);
         gl.uniformMatrix4fv(r.progEntity.u.uVP, false, vp);
         const m = M4.create();
-        const scale = blocking ? 0.46 : 0.36;
+        const scale = blocking ? 0.85 : 0.36;
         M4.fromTRS(m, x, y, z, rx, ry, 0.12, scale, scale, scale);
         gl.uniformMatrix4fv(r.progEntity.u.uModel, false, m);
         gl.uniform3fv(r.progEntity.u.uTint, [1, 1, 1]);
@@ -2510,6 +2758,22 @@
   function bobOffsetY(phase) { return Math.abs(Math.sin(phase)) * 0.06; }
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
   function capitalize(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
+
+  /** Reads a saved trim grid (see the customize-trims editor) from
+   * localStorage - null if there's never been one saved, or it's corrupt/
+   * stale from an older grid size, so start()/net.connect() always get
+   * either a valid trim or a clean null rather than needing to re-validate. */
+  function loadTrim(key) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const arr = JSON.parse(raw);
+      return MC.isValidTrim(arr) ? arr : null;
+    } catch (e) { return null; }
+  }
+  function saveTrim(key, arr) {
+    try { localStorage.setItem(key, JSON.stringify(arr)); } catch (e) { /* private-window/quota - trim just won't persist */ }
+  }
   function verbFor(cause) {
     return {
       sword: 'slew', arrow: 'shot', pearl: 'ambushed', fall: 'knocked off', void: 'ended',

@@ -462,6 +462,37 @@
 
   var SHIELD = { key: 'shield', name: 'Shield' };
 
+  // Custom armor/shield trims: a small pixel-art pattern a player paints
+  // (see the customize-trims editor in game.js) and that everyone else sees
+  // rendered onto their armor/shield (see textures.js's paintArmor/itemIcon).
+  // Index 0 is deliberately "no paint" - lets the tier's base texture (or
+  // the shield's default emblem) show through instead of being a 10th
+  // color. Lives here rather than textures.js since the server validates an
+  // incoming trim with the exact same rules, and textures.js isn't loadable
+  // server-side (it touches the DOM).
+  var TRIM_GRID = 16;
+  var TRIM_CELLS = TRIM_GRID * TRIM_GRID;
+  var TRIM_PALETTE = [
+    null,
+    '#d32f2f', // red
+    '#f57c00', // orange
+    '#fbc02d', // yellow
+    '#388e3c', // green
+    '#4fc3f7', // light blue
+    '#1450a3', // dark blue
+    '#8e24aa', // purple
+    '#181818', // black
+    '#f5f5f5'  // white
+  ];
+  function isValidTrim(trim) {
+    if (!Array.isArray(trim) || trim.length !== TRIM_CELLS) return false;
+    for (var i = 0; i < trim.length; i++) {
+      var v = trim[i];
+      if (typeof v !== 'number' || (v | 0) !== v || v < 0 || v >= TRIM_PALETTE.length) return false;
+    }
+    return true;
+  }
+
   var COMBAT = {
     MAX_HEALTH: 20,
     REACH_BLOCK: 5.0,
@@ -838,6 +869,10 @@
     ARMOR_PROT_LEVEL: ARMOR_PROT_LEVEL,
     ARMOR_TIERS: ARMOR_TIERS,
     SHIELD: SHIELD,
+    TRIM_GRID: TRIM_GRID,
+    TRIM_CELLS: TRIM_CELLS,
+    TRIM_PALETTE: TRIM_PALETTE,
+    isValidTrim: isValidTrim,
     COMBAT: COMBAT,
     PHYS: PHYS,
     breakTime: breakTime,

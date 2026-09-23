@@ -8,6 +8,11 @@
   const MC = global.MCBlocks;
   const T = MC.T;
   const TILE = 16;
+  // Custom armor/shield trims: grid size + hex palette live in shared/blocks.js
+  // (MC.TRIM_GRID/TRIM_PALETTE/isValidTrim) since the server also needs to
+  // validate an incoming trim payload - see MC.isValidTrim there.
+  const TRIM_GRID = MC.TRIM_GRID;
+  const TRIM_PALETTE = MC.TRIM_PALETTE;
 
   // ------------------------------------------------------------- rng ------
   function rng(seed) {
@@ -534,7 +539,7 @@
   // needing a separate texture system.
   const ARMOR_COLORS = { leather: '#8a5a2e', iron: '#d3d5d8', diamond: '#3fd0c9', netherite: '#17161a', wolf_fur: '#8a7a68', dog_armor: '#5a6a72' };
   const ARMOR_FLECKS = { leather: '#c9915a', iron: '#ffffff', diamond: '#c8fff9', netherite: '#6a5a52', wolf_fur: '#c9c0a8', dog_armor: '#8a9aa2' };
-  function paintArmor(tier) {
+  function paintArmor(tier, trim) {
     const cv = document.createElement('canvas');
     cv.width = cv.height = 64;
     const g = cv.getContext('2d');
@@ -557,11 +562,27 @@
       if (flecks() > 0.12) continue;
       g.fillRect((flecks() * 64) | 0, (flecks() * 64) | 0, 1, 1);
     }
+    // A player-painted trim (see game.js's customize-trims editor) is
+    // stamped on top of the tier's own noise/flecks - it tiles across every
+    // armor piece the same way the base swatch already does (this is one
+    // shared flat texture, not a real per-piece UV unwrap), and index 0
+    // ("no paint") leaves the base tier texture showing through untouched.
+    if (MC.isValidTrim(trim)) {
+      const cell = 64 / MC.TRIM_GRID;
+      for (let ty = 0; ty < MC.TRIM_GRID; ty++) {
+        for (let tx = 0; tx < MC.TRIM_GRID; tx++) {
+          const idx = trim[ty * MC.TRIM_GRID + tx];
+          if (!idx) continue;
+          g.fillStyle = TRIM_PALETTE[idx];
+          g.fillRect(tx * cell, ty * cell, cell, cell);
+        }
+      }
+    }
     return cv;
   }
 
-  function createArmorTexture(gl, tier) {
-    const cv = paintArmor(tier);
+  function createArmorTexture(gl, tier, trim) {
+    const cv = paintArmor(tier, trim);
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
@@ -692,7 +713,7 @@
    * for the 4 armor-piece keys (helmet/chestplate/leggings/boots) - pass the
    * player's actual armorTier so netherite renders in its own near-black
    * palette instead of always looking like diamond. */
-  function itemIcon(key, size, tier) {
+  function itemIcon(key, size, tier, trim) {
     const S = size || 48;
     const cv = document.createElement('canvas');
     cv.width = cv.height = S;
@@ -883,12 +904,38 @@
       g.lineTo(S * 0.14, S * 0.26);
       g.closePath();
       g.stroke();
-      g.fillStyle = '#d6dde6';
-      g.beginPath(); g.arc(S * 0.5, S * 0.42, S * 0.13, 0, 6.29); g.fill();
-      g.fillStyle = '#7de3e0';
-      g.beginPath();
-      g.moveTo(S * 0.5, S * 0.31); g.lineTo(S * 0.59, S * 0.42); g.lineTo(S * 0.5, S * 0.53); g.lineTo(S * 0.41, S * 0.42);
-      g.closePath(); g.fill();
+      if (MC.isValidTrim(trim)) {
+        // A player-painted trim replaces the default emblem below, clipped
+        // to the shield's own inner-border outline (same path just stroked
+        // above) so painted pixels never spill past the shield's silhouette.
+        g.save();
+        g.beginPath();
+        g.moveTo(S * 0.5, S * 0.11);
+        g.lineTo(S * 0.86, S * 0.26);
+        g.lineTo(S * 0.86, S * 0.54);
+        g.quadraticCurveTo(S * 0.86, S * 0.8, S * 0.5, S * 0.91);
+        g.quadraticCurveTo(S * 0.14, S * 0.8, S * 0.14, S * 0.54);
+        g.lineTo(S * 0.14, S * 0.26);
+        g.closePath();
+        g.clip();
+        const cell = S / MC.TRIM_GRID;
+        for (let ty = 0; ty < MC.TRIM_GRID; ty++) {
+          for (let tx = 0; tx < MC.TRIM_GRID; tx++) {
+            const idx = trim[ty * MC.TRIM_GRID + tx];
+            if (!idx) continue;
+            g.fillStyle = TRIM_PALETTE[idx];
+            g.fillRect(tx * cell, ty * cell, cell, cell);
+          }
+        }
+        g.restore();
+      } else {
+        g.fillStyle = '#d6dde6';
+        g.beginPath(); g.arc(S * 0.5, S * 0.42, S * 0.13, 0, 6.29); g.fill();
+        g.fillStyle = '#7de3e0';
+        g.beginPath();
+        g.moveTo(S * 0.5, S * 0.31); g.lineTo(S * 0.59, S * 0.42); g.lineTo(S * 0.5, S * 0.53); g.lineTo(S * 0.41, S * 0.42);
+        g.closePath(); g.fill();
+      }
     } else if (key === 'sword_plain') {
       // Same shape as the Sharpness V sword, plain steel-grey blade instead
       // of the enchanted cyan - enchantments don't change an item's model in
@@ -1166,6 +1213,7 @@
 
   global.MCTextures = {
     TILE, buildTiles, createBlockTexture, createSkinTexture, createLabelTexture, createArmorTexture,
-    blockIcon, itemIcon, heartIcon, flameIcon, paintSkin, paintArmor, SKIN_PARTS, boxUV, hashStr, POTION_COLORS
+    blockIcon, itemIcon, heartIcon, flameIcon, paintSkin, paintArmor, SKIN_PARTS, boxUV, hashStr, POTION_COLORS,
+    SHIELD_ICON_SIZE: 128
   };
 })(window);
