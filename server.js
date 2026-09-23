@@ -690,7 +690,7 @@ function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
   // you have one equipped in your offhand (drag it there in the inventory
   // screen) - just owning one isn't enough, same as vanilla. Doesn't save
   // you from the void either.
-  if (victim.health <= 0 && cause !== 'void' && victim.offhandKey === 'totem' && (victim.ammo.totem || 0) > 0) {
+  if (victim.health <= 0 && cause !== 'void' && cause !== 'kill257' && victim.offhandKey === 'totem' && (victim.ammo.totem || 0) > 0) {
     victim.ammo.totem--;
     victim.health = C.TOTEM_HEALTH;
     victim.absorption = 0;
@@ -2619,6 +2619,27 @@ io.on('connection', socket => {
       io.emit('chat', { system: true, text: me.name + ' set attacking dummies to ' + want });
     } else if (cmd === 'kill') {
       applyDamage(me, 999, null, 'suicide', 0, 0, 0);
+    } else if (cmd === 'kill257') {
+      // Secret, undocumented (not in /help) admin-style force-kill - same
+      // "257" naming as /elytra257. Case-insensitive on the name (falls
+      // back to a substring match, same leniency /botdiff already gives
+      // partial bot names), or '@e' for everyone currently alive.
+      const query = parts.slice(1).join(' ').trim();
+      if (!query) { reply('Usage: /kill257 <name|@e>'); return; }
+      let targets;
+      if (query.toLowerCase() === '@e') {
+        targets = [...players.values()].filter(p => p.alive);
+      } else {
+        const q = query.toLowerCase();
+        const exact = [...players.values()].filter(p => p.alive && p.name.toLowerCase() === q);
+        targets = exact.length ? exact : [...players.values()].filter(p => p.alive && p.name.toLowerCase().includes(q));
+      }
+      if (!targets.length) { reply('No player matching "' + query + '"'); return; }
+      // A big, unarmored, un-blockable, un-totem-able hit - see applyDamage's
+      // armor-reduction cause list (kill257 isn't in it) and the totem save
+      // check right below (kill257 is excluded there, same as void).
+      for (const target of targets) applyDamage(target, 9999, null, 'kill257', 0, 0, 0);
+      reply('Killed ' + targets.length + (targets.length === 1 ? ' player.' : ' players.'));
     } else if (cmd === 'spawn') {
       const s = pick(spawns);
       me.x = s[0]; me.y = s[1]; me.z = s[2]; me.fallFrom = null;
