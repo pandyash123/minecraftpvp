@@ -134,8 +134,13 @@ function pickBotWeapon(kit) {
 }
 
 // ---------------------------------------------------------------- world ---
-const blocks = WorldGen.generate(SEED);
-const spawns = WorldGen.spawnPoints(blocks, SEED);
+// Which arena layout is loaded (see WorldGen.ARENAS). Switchable at
+// runtime with /arena, which regenerates the world in place.
+let currentArena = WorldGen.arenaKey(process.env.ARENA || 'classic');
+const blocks = WorldGen.generate(SEED, currentArena);
+// Reassigned whenever the arena changes - spawn rings are per-layout, and
+// a Skyward spawn on the classic map would drop people in mid-air.
+let spawns = WorldGen.spawnPoints(blocks, SEED, currentArena);
 /** index -> blockId, every edit made since the server booted */
 const edits = new Map();
 
@@ -146,8 +151,10 @@ const edits = new Map();
  * refresh - so they don't come back to a map cluttered with their last
  * session's cobble towers. Never called while anyone else is still playing.
  */
-function resetWorld() {
-  blocks.set(WorldGen.generate(SEED));
+function resetWorld(arena) {
+  if (arena) currentArena = WorldGen.arenaKey(arena);
+  blocks.set(WorldGen.generate(SEED, currentArena));
+  spawns = WorldGen.spawnPoints(blocks, SEED, currentArena);
   edits.clear();
 }
 
@@ -2069,14 +2076,14 @@ app.use(noCache);
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0, etag: false, lastModified: false }));
 app.use('/shared', express.static(path.join(__dirname, 'shared'), { maxAge: 0, etag: false, lastModified: false }));
 app.get('/health', (req, res) => res.json({
-  ok: true, players: players.size, bots: [...players.values()].filter(p => p.bot).length, seed: SEED
+  ok: true, players: players.size, bots: [...players.values()].filter(p => p.bot).length, seed: SEED, arena: currentArena
 }));
 // Manual escape hatch for the menu's "Reset Terrain" button - doesn't need a
 // live socket connection (the button lives on the pre-join menu screen), and
 // still broadcasts to anyone already playing so their client rebuilds too.
 app.post('/reset', (req, res) => {
   resetWorld();
-  io.emit('worldReset', { seed: SEED });
+  io.emit('worldReset', { seed: SEED, arena: currentArena });
   io.emit('chat', { system: true, text: 'The terrain was reset.' });
   res.json({ ok: true });
 });
@@ -2094,7 +2101,9 @@ io.on('connection', socket => {
     // Nobody else human around (typical "refresh the tab, click Play again")
     // -> treat this as a fresh session and clear whatever got built/broken
     // last time. Never wipes a map other real players are still using.
-    if (![...players.values()].some(p => !p.bot)) resetWorld();
+    // A lone player rejoining also gets whatever arena they picked at the
+    // menu - with nobody else around there's nothing to disrupt.
+    if (![...players.values()].some(p => !p.bot)) resetWorld(data && data.arena);
     me = makePlayer(socket.id, name, false, data && data.armor, kit, data && data.customItems, data && data.enchantOpts, data && data.swordTier, data && data.axeTier, data && data.dogArmor, data && data.trims);
     me.socket = socket;
     players.set(me.id, me);
@@ -2105,6 +2114,7 @@ io.on('connection', socket => {
     socket.emit('init', {
       id: me.id,
       seed: SEED,
+      arena: currentArena,
       spawn: { x: me.x, y: me.y, z: me.z },
       edits: editList,
       players: [...players.values()].map(publicPlayer),
@@ -2728,6 +2738,30 @@ io.on('connection', socket => {
       const s = pick(spawns);
       me.x = s[0]; me.y = s[1]; me.z = s[2]; me.fallFrom = null;
       socket.emit('teleport', { x: me.x, y: me.y, z: me.z });
+    } else if (cmd === 'arena') {
+      const want = (parts[1] || '').toLowerCase();
+      if (!want || !WorldGen.ARENAS[want]) {
+        const list = WorldGen.ARENA_KEYS.map(k => k + ' (' + WorldGen.ARENAS[k].name + ')').join(', ');
+        reply('Usage: /arena <' + WorldGen.ARENA_KEYS.join('|') + '>  -  ' + list);
+        reply('Currently playing: ' + WorldGen.ARENAS[currentArena].name);
+        return;
+      }
+      resetWorld(want);
+      io.emit('worldReset', { seed: SEED, arena: currentArena });
+      // Everyone has to be put back on the new layout - the old spawn ring
+      // could easily be inside a wall, or mid-air, on a different arena.
+      for (const p of players.values()) {
+        const s2 = pick(spawns);
+        p.x = s2[0]; p.y = s2[1]; p.z = s2[2];
+        p.vx = p.vy = p.vz = 0;
+        p.fallFrom = null; p.smashPeak = null;
+        if (p.socket) p.socket.emit('teleport', { x: p.x, y: p.y, z: p.z });
+      }
+      // Wolves belong to the old map too; drop them rather than leave them
+      // standing in whatever the new arena put where they were.
+      for (const w of wolves.values()) io.emit('wolfDeath', { id: w.id });
+      wolves.clear();
+      io.emit('chat', { system: true, text: me.name + ' changed the arena to ' + WorldGen.ARENAS[currentArena].name });
     } else if (cmd === 'weather') {
       const kind = (parts[1] || '').toLowerCase();
       if (kind !== 'clear' && kind !== 'rain' && kind !== 'thunder') { reply('Usage: /weather <clear|rain|thunder>'); return; }
@@ -2739,7 +2773,7 @@ io.on('connection', socket => {
       io.emit('weather', { kind: weather });
       io.emit('chat', { system: true, text: me.name + ' set the weather to ' + weather });
     } else if (cmd === 'help') {
-      reply('Commands: /bots <0-16> [difficulty] [armor] [kit] [weapon], /difficulty <easy|normal|hard|random>, /botarmor <none|leather|iron|diamond|netherite>, /botkit <sword|axe|web>, /botweapon <fixed|versatile|full>, /botteam <on|off>, /bothacks <on|off>, /kit <sword|axe|web>, /botdiff <name> <level>, /dummy <0-3> [shield|noshield], /atkdummy <0-3>, /weather <clear|rain|thunder>, /spawn, /kill, /help');
+      reply('Commands: /bots <0-16> [difficulty] [armor] [kit] [weapon], /difficulty <easy|normal|hard|random>, /botarmor <none|leather|iron|diamond|netherite>, /botkit <sword|axe|web>, /botweapon <fixed|versatile|full>, /botteam <on|off>, /bothacks <on|off>, /kit <sword|axe|web>, /botdiff <name> <level>, /dummy <0-3> [shield|noshield], /atkdummy <0-3>, /weather <clear|rain|thunder>, /arena <classic|magma|skyward|frost>, /spawn, /kill, /help');
     } else {
       reply('Unknown command: ' + cmd + ' (try /help)');
     }

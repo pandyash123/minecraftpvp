@@ -8,9 +8,10 @@
   const CH = W.CHUNK;
 
   class World {
-    constructor(seed) {
+    constructor(seed, arena) {
       this.seed = seed;
-      this.blocks = Gen.generate(seed);
+      this.arena = Gen.arenaKey(arena);
+      this.blocks = Gen.generate(seed, this.arena);
       this.cx = W.SX / CH;
       this.cz = W.SZ / CH;
       this.chunkCount = this.cx * this.cz;

@@ -192,10 +192,10 @@
     }
   }
 
-  // ------------------------------------------------------------ generate --
-  function generate(seed) {
-    seed = seed | 0;
-    var blocks = new Uint8Array(SX * SY * SZ);
+  // ------------------------------------------------------- arena: classic --
+  /** The original arena: rolling grass, a terraced pyramid centrepiece and
+   *  a crenellated ring wall. */
+  function buildClassic(blocks, seed) {
     var x, y, z;
 
     for (z = 0; z < SZ; z++) {
@@ -235,7 +235,229 @@
     perimeterWall(blocks, seed);
 
     box(blocks, 0, 0, 0, SX - 1, 0, SZ - 1, ID.BEDROCK);
-    return blocks;
+  }
+
+
+  // ------------------------------------------------------- arena helpers --
+  /** Flat bedrock floor + fill up to `top`, with `cap` on the surface. The
+   *  shared base every non-classic arena starts from. */
+  function flatGround(blocks, top, cap, fill) {
+    var x, y, z;
+    for (z = 0; z < SZ; z++) {
+      for (x = 0; x < SX; x++) {
+        for (y = 0; y <= top; y++) {
+          blocks[idx(x, y, z)] = y === 0 ? ID.BEDROCK : (y === top ? cap : fill);
+        }
+      }
+    }
+  }
+
+  /** A solid ring wall of `id` from `yFrom` to `yTo`, with four gateways
+   *  left open so the arena reads as enclosed without being a sealed box.
+   *  Same distance-based ring as perimeterWall, for the same reason: a
+   *  square of four straight walls has confusing corners. */
+  function ringWall(blocks, radius, yFrom, yTo, id, capId) {
+    var gates = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
+    for (var z = 0; z < SZ; z++) {
+      var dz = z - CZ;
+      for (var x = 0; x < SX; x++) {
+        var dx = x - CX;
+        var d = Math.sqrt(dx * dx + dz * dz);
+        if (d < radius - 2 || d > radius + 1) continue;
+        var ang = Math.atan2(dz, dx), isGate = false;
+        for (var g = 0; g < gates.length; g++) {
+          if (Math.abs(angleDiff(ang, gates[g])) < 0.11) { isGate = true; break; }
+        }
+        if (isGate) continue;
+        for (var y = yFrom; y <= yTo; y++) blocks[idx(x, y, z)] = id;
+        if (capId && yTo + 1 < SY) blocks[idx(x, yTo + 1, z)] = capId;
+      }
+    }
+  }
+
+  /** A filled disc of `id` at one height - islands, pools and platforms. */
+  function disc(blocks, cx, cz, radius, y, id) {
+    if (y < 0 || y >= SY) return;
+    for (var z = Math.floor(cz - radius); z <= Math.ceil(cz + radius); z++) {
+      if (z < 0 || z >= SZ) continue;
+      for (var x = Math.floor(cx - radius); x <= Math.ceil(cx + radius); x++) {
+        if (x < 0 || x >= SX) continue;
+        var dx = x - cx, dz = z - cz;
+        if (dx * dx + dz * dz > radius * radius) continue;
+        blocks[idx(x, y, z)] = id;
+      }
+    }
+  }
+
+  // -------------------------------------------------------- arena: magma --
+  /** Obsidian plateau pocked with lava pools, ringed by an obsidian wall
+   *  lit with glowstone. No trees, no soft ground - the hazard is the map. */
+  function buildMagma(blocks, seed) {
+    var x, z;
+    flatGround(blocks, GROUND, ID.COBBLE, ID.STONE);
+
+    // Scorched patches so the floor isn't a uniform grey sheet.
+    for (z = 0; z < SZ; z++) {
+      for (x = 0; x < SX; x++) {
+        var n = fbm(x / 9, z / 9, seed + 31, 2);
+        if (n > 0.62) blocks[idx(x, GROUND, z)] = ID.OBSIDIAN;
+        else if (n < 0.34) blocks[idx(x, GROUND, z)] = ID.GRAVEL;
+      }
+    }
+
+    // Lava pools, sunk a block into the floor. Kept off the spawn ring
+    // radius so nobody materialises standing in one.
+    for (var i = 0; i < 7; i++) {
+      var ang = (i / 7) * Math.PI * 2 + 0.6;
+      var dist = i % 2 === 0 ? 11 : 20;
+      var px = Math.round(CX + Math.cos(ang) * dist);
+      var pz = Math.round(CZ + Math.sin(ang) * dist);
+      var r = 2 + (i % 3);
+      disc(blocks, px, pz, r + 1, GROUND, ID.OBSIDIAN);
+      disc(blocks, px, pz, r, GROUND, ID.LAVA);
+      disc(blocks, px, pz, r, GROUND - 1, ID.LAVA);
+    }
+
+    // Central stepped obsidian spire, walkable from every side.
+    for (var t = 0; t < 5; t++) {
+      var half = 8 - t * 2;
+      box(blocks, CX - half, GROUND + 1 + t, CZ - half, CX + half, GROUND + 1 + t, CZ + half,
+        t === 4 ? ID.GOLD : ID.OBSIDIAN);
+    }
+    box(blocks, CX - 1, GROUND + 6, CZ - 1, CX + 1, GROUND + 7, CZ + 1, ID.GLOWSTONE);
+
+    // Obsidian pillars for cover, each topped with a light.
+    for (var k = 0; k < 8; k++) {
+      var a2 = (k / 8) * Math.PI * 2 + 0.2;
+      var cx2 = Math.round(CX + Math.cos(a2) * 15);
+      var cz2 = Math.round(CZ + Math.sin(a2) * 15);
+      box(blocks, cx2 - 1, GROUND + 1, cz2 - 1, cx2 + 1, GROUND + 4, cz2 + 1, ID.OBSIDIAN);
+      blocks[idx(cx2, GROUND + 5, cz2)] = ID.GLOWSTONE;
+    }
+
+    ringWall(blocks, WALL_R, GROUND - 2, GROUND + 10, ID.OBSIDIAN, null);
+    // Lights set into the wall so the ring is readable at night.
+    for (var w = 0; w < 16; w++) {
+      var aw = (w / 16) * Math.PI * 2;
+      var wx = Math.round(CX + Math.cos(aw) * (WALL_R - 2));
+      var wz = Math.round(CZ + Math.sin(aw) * (WALL_R - 2));
+      if (wx < 0 || wx >= SX || wz < 0 || wz >= SZ) continue;
+      blocks[idx(wx, GROUND + 6, wz)] = ID.GLOWSTONE;
+    }
+    box(blocks, 0, 0, 0, SX - 1, 0, SZ - 1, ID.BEDROCK);
+  }
+
+  // ------------------------------------------------------ arena: skyward --
+  // Two tiers: a barren lower floor and a ring of floating islands linked by
+  // plank bridges overhead. Deliberately NOT a true void map - with nothing
+  // underneath, bots walk off the edge on a loop and hand out free kills.
+  var SKY_Y = GROUND + 14;
+
+  function skyIslands() {
+    var pts = [[CX, CZ, 9]];
+    for (var i = 0; i < 5; i++) {
+      var ang = (i / 5) * Math.PI * 2 + 0.4;
+      pts.push([Math.round(CX + Math.cos(ang) * 19), Math.round(CZ + Math.sin(ang) * 19), 5]);
+    }
+    return pts;
+  }
+
+  function buildSkyward(blocks, seed) {
+    var x, z;
+    flatGround(blocks, GROUND, ID.GRAVEL, ID.STONE);
+    for (z = 0; z < SZ; z++) {
+      for (x = 0; x < SX; x++) {
+        if (fbm(x / 7, z / 7, seed + 77, 2) > 0.6) blocks[idx(x, GROUND, z)] = ID.COBBLE;
+      }
+    }
+
+    var isles = skyIslands();
+    for (var i = 0; i < isles.length; i++) {
+      var ix = isles[i][0], iz = isles[i][1], r = isles[i][2];
+      // Tapered underside so each island reads as a chunk of torn-up land
+      // rather than a floating pancake.
+      disc(blocks, ix, iz, r, SKY_Y, ID.GRASS);
+      disc(blocks, ix, iz, r, SKY_Y - 1, ID.DIRT);
+      disc(blocks, ix, iz, r - 1, SKY_Y - 2, ID.STONE);
+      disc(blocks, ix, iz, r - 3, SKY_Y - 3, ID.STONE);
+      if (i > 0 && hash2(ix, iz, seed + 5) > 0.45) tree(blocks, ix, SKY_Y + 1, iz, seed);
+    }
+
+    // Plank bridges from the centre island out to each satellite, drawn as
+    // a 3-wide cross at each step so diagonal runs stay walkable.
+    for (var b = 1; b < isles.length; b++) {
+      var bx = isles[b][0], bz = isles[b][1];
+      for (var s = 0; s <= 40; s++) {
+        var t2 = s / 40;
+        var px = Math.round(CX + (bx - CX) * t2);
+        var pz = Math.round(CZ + (bz - CZ) * t2);
+        for (var w = -1; w <= 1; w++) {
+          if (px + w >= 0 && px + w < SX) blocks[idx(px + w, SKY_Y, pz)] = ID.PLANKS;
+          if (pz + w >= 0 && pz + w < SZ) blocks[idx(px, SKY_Y, pz + w)] = ID.PLANKS;
+        }
+      }
+    }
+
+    // A staircase from the floor up to the islands, so the top tier is
+    // reachable without pearls.
+    for (var st = 0; st <= SKY_Y - GROUND; st++) {
+      var sx = CX + 12 - Math.round(st * 0.45);
+      box(blocks, sx - 1, GROUND + st, CZ + 11, sx + 1, GROUND + st, CZ + 13, ID.COBBLE);
+    }
+
+    box(blocks, CX - 1, SKY_Y + 1, CZ - 1, CX + 1, SKY_Y + 2, CZ + 1, ID.GLASS);
+    blocks[idx(CX, SKY_Y + 3, CZ)] = ID.GOLD;
+
+    ringWall(blocks, WALL_R, GROUND - 2, GROUND + 7, ID.COBBLE, ID.BRICK);
+    box(blocks, 0, 0, 0, SX - 1, 0, SZ - 1, ID.BEDROCK);
+  }
+
+  // -------------------------------------------------------- arena: frost --
+  /** A glass keep on a frozen lake: powder snow drifts break falls and
+   *  smother fire, meltwater channels slow you down. */
+  function buildFrost(blocks, seed) {
+    var x, z;
+    flatGround(blocks, GROUND, ID.GLASS, ID.STONE);
+
+    for (z = 0; z < SZ; z++) {
+      for (x = 0; x < SX; x++) {
+        var n = fbm(x / 11, z / 11, seed + 404, 3);
+        if (n > 0.58) blocks[idx(x, GROUND, z)] = ID.WATER;
+        else if (n < 0.4) blocks[idx(x, GROUND, z)] = ID.GRAVEL;
+      }
+    }
+
+    // Snow drifts - walk-through cover that also cancels fall damage.
+    for (var i = 0; i < 14; i++) {
+      var ang = (i / 14) * Math.PI * 2 + 0.25;
+      var dist = 10 + (i % 4) * 4;
+      var px = Math.round(CX + Math.cos(ang) * dist);
+      var pz = Math.round(CZ + Math.sin(ang) * dist);
+      disc(blocks, px, pz, 2, GROUND + 1, ID.POWDER_SNOW);
+      disc(blocks, px, pz, 1, GROUND + 2, ID.POWDER_SNOW);
+    }
+
+    // The keep: a hollow glass block with stone corner pillars and a roof
+    // you can fight on.
+    var h = 10, half = 7;
+    box(blocks, CX - half, GROUND + 1, CZ - half, CX + half, GROUND + h, CZ + half, ID.GLASS);
+    box(blocks, CX - half + 1, GROUND + 1, CZ - half + 1, CX + half - 1, GROUND + h - 1, CZ + half - 1, ID.AIR);
+    box(blocks, CX - 1, GROUND + 1, CZ - half, CX + 1, GROUND + 3, CZ - half, ID.AIR);
+    box(blocks, CX - 1, GROUND + 1, CZ + half, CX + 1, GROUND + 3, CZ + half, ID.AIR);
+    box(blocks, CX - half, GROUND + 1, CZ - 1, CX - half, GROUND + 3, CZ + 1, ID.AIR);
+    box(blocks, CX + half, GROUND + 1, CZ - 1, CX + half, GROUND + 3, CZ + 1, ID.AIR);
+    var corners = [[-half, -half], [-half, half], [half, -half], [half, half]];
+    for (var c = 0; c < corners.length; c++) {
+      box(blocks, CX + corners[c][0], GROUND + 1, CZ + corners[c][1],
+        CX + corners[c][0], GROUND + h + 2, CZ + corners[c][1], ID.STONE);
+    }
+    box(blocks, CX - half, GROUND + h, CZ - half, CX + half, GROUND + h, CZ + half, ID.GLASS);
+    blocks[idx(CX, GROUND + h + 1, CZ)] = ID.GOLD;
+    // Snow piled inside, so dropping in through the roof is survivable.
+    disc(blocks, CX, CZ, 3, GROUND + 1, ID.POWDER_SNOW);
+
+    ringWall(blocks, WALL_R, GROUND - 2, GROUND + 8, ID.STONE, ID.GLASS);
+    box(blocks, 0, 0, 0, SX - 1, 0, SZ - 1, ID.BEDROCK);
   }
 
   // Topmost solid block at a column (used for spawn placement).
@@ -247,19 +469,64 @@
     return 1;
   }
 
-  function spawnPoints(blocks, seed) {
+  /** Ring of candidate spawns at `dist` from the centre, dropped onto
+   *  whatever is solid beneath and rejected if that lands in lava or water -
+   *  an arena with pools would otherwise spawn people straight into them. */
+  function ringSpawns(blocks, dist, count, spread) {
     var pts = [];
-    for (var i = 0; i < 20; i++) {
-      var ang = (i / 20) * Math.PI * 2;
-      var dist = 13 + (i % 4) * 2.5;
-      var x = Math.round(CX + Math.cos(ang) * dist);
-      var z = Math.round(CZ + Math.sin(ang) * dist);
-      x = Math.max(2, Math.min(SX - 3, x));
-      z = Math.max(2, Math.min(SZ - 3, z));
+    for (var i = 0; i < count; i++) {
+      var ang = (i / count) * Math.PI * 2;
+      var d = dist + (i % 4) * (spread || 0);
+      var x = Math.max(2, Math.min(SX - 3, Math.round(CX + Math.cos(ang) * d)));
+      var z = Math.max(2, Math.min(SZ - 3, Math.round(CZ + Math.sin(ang) * d)));
       var y = surfaceY(blocks, x, z);
+      var here = blocks[idx(x, y, z)];
+      var above = y + 1 < SY ? blocks[idx(x, y + 1, z)] : ID.AIR;
+      if (here === ID.LAVA || above === ID.LAVA || above === ID.WATER) continue;
       pts.push([x + 0.5, y + 1.05, z + 0.5]);
     }
-    if (!pts.length) pts.push([CX, GROUND + 2, CZ]);
+    return pts;
+  }
+
+  var ARENAS = {
+    classic: { name: 'Ruined Keep', build: buildClassic, spawns: function (b) { return ringSpawns(b, 13, 20, 2.5); } },
+    magma: { name: 'Magma Pit', build: buildMagma, spawns: function (b) { return ringSpawns(b, 16, 20, 1.5); } },
+    skyward: { name: 'Skyward', build: buildSkyward, spawns: function (b) { return skywardSpawns(b); } },
+    frost: { name: 'Frostbite', build: buildFrost, spawns: function (b) { return ringSpawns(b, 17, 20, 1.5); } }
+  };
+  var ARENA_KEYS = ['classic', 'magma', 'skyward', 'frost'];
+
+  /** Skyward spawns people on the islands themselves - a ring spawn would
+   *  drop everyone on the empty lower floor and nobody would find the map. */
+  function skywardSpawns(blocks) {
+    var pts = [], isles = skyIslands();
+    for (var i = 1; i < isles.length; i++) {
+      var ix = isles[i][0], iz = isles[i][1];
+      for (var k = 0; k < 4; k++) {
+        var a = (k / 4) * Math.PI * 2;
+        var x = Math.max(2, Math.min(SX - 3, Math.round(ix + Math.cos(a) * 2)));
+        var z = Math.max(2, Math.min(SZ - 3, Math.round(iz + Math.sin(a) * 2)));
+        pts.push([x + 0.5, surfaceY(blocks, x, z) + 1.05, z + 0.5]);
+      }
+    }
+    return pts;
+  }
+
+  function arenaKey(key) {
+    return ARENAS[key] ? key : 'classic';
+  }
+
+  // ------------------------------------------------------------ generate --
+  function generate(seed, arena) {
+    seed = seed | 0;
+    var blocks = new Uint8Array(SX * SY * SZ);
+    ARENAS[arenaKey(arena)].build(blocks, seed);
+    return blocks;
+  }
+
+  function spawnPoints(blocks, seed, arena) {
+    var pts = ARENAS[arenaKey(arena)].spawns(blocks, seed);
+    if (!pts.length) pts.push([CX + 0.5, GROUND + 2, CZ + 0.5]);
     return pts;
   }
 
@@ -268,6 +535,9 @@
     heightAt: heightAt,
     surfaceY: surfaceY,
     spawnPoints: spawnPoints,
-    idx: idx
+    idx: idx,
+    ARENAS: ARENAS,
+    ARENA_KEYS: ARENA_KEYS,
+    arenaKey: arenaKey
   };
 });

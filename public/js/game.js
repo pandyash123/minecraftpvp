@@ -30,7 +30,7 @@
         killfeed: el('killfeed'), ammo: el('ammoText'), fps: el('fps'), ping: el('pingText'), viewModeBtn: el('viewModeBtn'),
         chargeWrap: el('chargeWrap'), chargeFill: el('chargeFill'),
         menu: el('menu'), nameInput: el('nameInput'), playBtn: el('playBtn'), botsInput: el('botsInput'),
-        kitSelect: el('kitSelect'), botKitSelect: el('botKitSelect'),
+        kitSelect: el('kitSelect'), botKitSelect: el('botKitSelect'), arenaSelect: el('arenaSelect'),
         botWeaponSelect: el('botWeaponSelect'), botTeamCheck: el('botTeamCheck'), botHacksCheck: el('botHacksCheck'),
         difficultySelect: el('difficultySelect'), armorSelect: el('armorSelect'), dummyCheck: el('dummyCheck'),
         dummyShieldCheck: el('dummyShieldCheck'),
@@ -136,6 +136,8 @@
       if (saved) this.hud.nameInput.value = saved;
       const savedKit = localStorage.getItem('mc_kit');
       if (savedKit && this.hud.kitSelect) this.hud.kitSelect.value = savedKit;
+      const savedArena = localStorage.getItem('mc_arena');
+      if (savedArena && this.hud.arenaSelect) this.hud.arenaSelect.value = savedArena;
       this.hud.playBtn.addEventListener('click', () => this._startFromMenu());
       this.hud.nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') this._startFromMenu(); });
       this.hud.resetTerrainBtn.addEventListener('click', () => this._resetTerrainFromMenu());
@@ -710,10 +712,12 @@
       // whatever was last saved just applies, no re-import needed each
       // session (see loadTrims()).
       const trims = loadTrims();
+      const arena = this.hud.arenaSelect ? this.hud.arenaSelect.value : 'classic';
+      localStorage.setItem('mc_arena', arena);
       this.hud.menu.classList.add('hidden');
       this.hud.loading.classList.remove('hidden');
       global.MCSound.resume();
-      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims).catch(err => {
+      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena).catch(err => {
         console.error(err);
         this.hud.loading.classList.add('hidden');
         this.hud.menu.classList.remove('hidden');
@@ -721,7 +725,7 @@
       });
     }
 
-    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims) {
+    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena) {
       // Drives the armor-piece icon color in the inventory (see
       // _buildInventoryUI/_renderChestSlot) - the human player's own tier
       // isn't part of `this.me` (only remote players carry .armor, from
@@ -737,8 +741,8 @@
       // speed) - combat-relevant enchants are already re-validated server-side
       // regardless of what this holds.
       this.myEnchants = enchantOpts || MC.defaultEnchantOpts();
-      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, this.myTrims);
-      this.world = new global.MCWorld(init.seed);
+      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, this.myTrims, arena);
+      this.world = new global.MCWorld(init.seed, init.arena);
       this.world.applyEdits(init.edits || []);
       // The WebGL context (and everything already uploaded into it - block
       // texture, cached skins) is reused across sessions; only the world's
@@ -936,9 +940,10 @@
         // Someone hit "Reset Terrain" (possibly this same player, from
         // another tab) while this session was already live - rebuild the
         // whole world model and every chunk mesh from scratch.
-        this.world = new global.MCWorld(d.seed);
+        this.world = new global.MCWorld(d.seed, d.arena);
         await this._buildInitialMeshes();
-        this._log('The terrain was reset.', true);
+        const arena = global.MCWorldGen.ARENAS[this.world.arena];
+        this._log(d.arena && arena ? ('Now playing: ' + arena.name + '.') : 'The terrain was reset.', true);
       });
       net.on('respawn', d => {
         this.me.x = d.x; this.me.y = d.y; this.me.z = d.z;

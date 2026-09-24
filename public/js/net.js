@@ -14,7 +14,7 @@
     on(evt, fn) { (this.handlers[evt] = this.handlers[evt] || []).push(fn); return this; }
     emit2(evt, data) { (this.handlers[evt] || []).forEach(fn => fn(data)); }
 
-    connect(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims) {
+    connect(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena) {
       return new Promise((resolve, reject) => {
         const socket = io({ transports: ['websocket', 'polling'] });
         this.socket = socket;
@@ -22,7 +22,7 @@
 
         socket.on('connect', () => {
           this.connected = true;
-          socket.emit('join', { name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims }, () => {
+          socket.emit('join', { name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena }, () => {
             clearTimeout(timeout);
           });
         });
@@ -33,7 +33,11 @@
         const events = ['playerJoin', 'playerLeave', 'spawned', 'respawn', 'teleport', 'hurt', 'heal',
           'killreward', 'hp', 'death', 'block', 'snapshot', 'projectile', 'projectileGone', 'swing',
           'hitmarker', 'arrowHit', 'effect', 'scores', 'chat', 'ammo', 'shieldStun', 'launch',
-          'effects', 'weather', 'elytraUnlocked', 'wolfSpawn', 'wolfHp', 'wolfDeath', 'wolfTeleport', 'shopState'];
+          'effects', 'weather', 'elytraUnlocked', 'wolfSpawn', 'wolfHp', 'wolfDeath', 'wolfTeleport', 'shopState',
+          // worldReset was missing here, so game.js's listener for it never
+          // fired and an in-game terrain reset (or arena change) left
+          // everyone still rendering the old map.
+          'worldReset'];
         for (const e of events) socket.on(e, data => this.emit2(e, data));
 
         socket.on('disconnect', reason => this.emit2('disconnected', reason));
