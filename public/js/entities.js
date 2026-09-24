@@ -94,9 +94,15 @@
     // pull back by the full GAP on both sides and you'd double it.
     const GAP = 0.4, HALF = GAP / 2;
     return {
-      // helmet - just the top 5 of 8px of the head (crown/forehead),
-      // leaving eyes-down-to-chin and the neck exposed. Small bulge.
+      // helmet - the top 5 of 8px of the head (crown/forehead), leaving
+      // eyes-down-to-chin and the neck exposed. Small bulge.
       head: { geo: box(8.5, 5, 8.5, -4.25, 3, -4.25, P.head), pivot: [0, 24 * S, 0] },
+      // ...plus a brow tab down each side of the front, with a gap between
+      // them: the notch over the face that makes a Minecraft helmet read as
+      // a helmet rather than a plain cap. Shallow (one pixel of depth) so
+      // it sits on the front of the crown instead of boxing the head in.
+      browL: { geo: box(2.75, 2, 1, -4.25, 1, -4.25, P.head), pivot: [0, 24 * S, 0] },
+      browR: { geo: box(2.75, 2, 1, 1.5, 1, -4.25, P.head), pivot: [0, 24 * S, 0] },
       // chestplate torso - small bulge so a sliver of shirt shows at the
       // edges; shares a boundary with the leggings at the waist.
       body: { geo: box(9, 12 - GAP, 5, -4.5, -12 + HALF, -2.5, P.body), pivot: [0, 24 * S, 0] },

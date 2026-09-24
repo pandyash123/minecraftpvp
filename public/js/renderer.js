@@ -13,7 +13,9 @@
   const ME = global.MCEntities;
   // Which armorParts bones make up each painted piece (see the trim editor).
   const ARMOR_PIECE_BONES = {
-    helmet: ['head'],
+    // The helmet is three boxes: the crown plus two brow tabs either side
+    // of the face opening (see MCEntities.armorParts).
+    helmet: ['head', 'browL', 'browR'],
     chest: ['body', 'armR', 'armL'],
     legs: ['legR', 'legL'],
     boots: ['bootR', 'bootL']
@@ -275,12 +277,12 @@
      * grid array (a WeakMap, so it's dropped once the owner's remote entry
      * goes away), keyed within that by tier+piece since leggings and boots
      * share atlas rects and must not share a texture. */
-    getPieceArmorTexture(tier, pieceKey, grid) {
-      if (!MC.isValidTrim(grid)) return this.getArmorTexture(tier);
-      let byPiece = this.customArmorTex.get(grid);
-      if (!byPiece) { byPiece = {}; this.customArmorTex.set(grid, byPiece); }
+    getPieceArmorTexture(tier, pieceKey, faceGrids) {
+      if (!MC.hasAnyTrim(faceGrids)) return this.getArmorTexture(tier);
+      let byPiece = this.customArmorTex.get(faceGrids);
+      if (!byPiece) { byPiece = {}; this.customArmorTex.set(faceGrids, byPiece); }
       const k = tier + ':' + pieceKey;
-      if (!byPiece[k]) byPiece[k] = global.MCTextures.createArmorTexture(this.gl, tier, pieceKey, grid);
+      if (!byPiece[k]) byPiece[k] = global.MCTextures.createArmorTexture(this.gl, tier, pieceKey, faceGrids);
       return byPiece[k];
     }
 

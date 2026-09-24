@@ -45,6 +45,7 @@
         trimsBtn: el('trimsBtn'), trimEditor: el('trimEditor'), trimCanvas: el('trimCanvas'),
         trimTabs: el('trimTabs'), trimPalette: el('trimPalette'), trimHint: el('trimHint'),
         trimRotateRow: el('trimRotateRow'), trimRotL: el('trimRotL'), trimRotR: el('trimRotR'),
+        trimMirrorCheck: el('trimMirrorCheck'), trimMirrorLabel: el('trimMirrorLabel'),
         trimBrushRow: el('trimBrushRow'), trimClearBtn: el('trimClearBtn'), trimExportBtn: el('trimExportBtn'),
         trimImportBtn: el('trimImportBtn'), trimImportInput: el('trimImportInput'), trimCloseBtn: el('trimCloseBtn')
       };
@@ -189,7 +190,9 @@
      * the real piece (see itemIcon's TRIMMABLE_ICONS). */
     _trimFor(iconKey) {
       const slot = { helmet: 'helmet', chestplate: 'chest', leggings: 'legs', boots: 'boots', elytra: 'elytra', shield: 'shield' }[iconKey];
-      return (slot && this.myTrims) ? this.myTrims[slot] : null;
+      // An icon is a flat picture of the piece, so it shows the front face.
+      const faces = (slot && this.myTrims) ? this.myTrims[slot] : null;
+      return faces ? faces.front || null : null;
     }
 
     /**
@@ -213,7 +216,7 @@
       const ME = global.MCEntities;
       const cv = hud.trimCanvas;
       const ctx = cv.getContext('2d');
-      const PIECE_BONES = { helmet: ['head'], chest: ['body', 'armR', 'armL'], legs: ['legR', 'legL'], boots: ['bootR', 'bootL'] };
+      const PIECE_BONES = { helmet: ['head', 'browL', 'browR'], chest: ['body', 'armR', 'armL'], legs: ['legR', 'legL'], boots: ['bootR', 'bootL'] };
       const ICON_FOR = { elytra: 'elytra', shield: 'shield' };
 
       this._trims = loadTrims() || {};
@@ -223,7 +226,12 @@
       let yaw = 0.7, pitch = -0.35; // a slight look-down, like a display stand
 
       const blank = () => new Array(MC.TRIM_CELLS).fill(0);
-      const gridFor = slot => this._trims[slot] || (this._trims[slot] = blank());
+      // Each side of a piece keeps its own grid, so the front of a helmet
+      // can differ from its back. Flat items only ever use 'front'.
+      const gridFor = (slot, face) => {
+        const faces = this._trims[slot] || (this._trims[slot] = {});
+        return faces[face] || (faces[face] = blank());
+      };
       const tier = () => (hud.netheriteArmorCheck && hud.netheriteArmorCheck.checked) ? 'netherite' : 'diamond';
       const is3D = slot => !!PIECE_BONES[slot];
 
@@ -268,6 +276,9 @@
             // corner 0 is the rect origin and 3 is the far corner.
             faces.push({
               c, light: v[f * 24 + 5],
+              // box() emits its six quads in exactly MC.TRIM_FACES order,
+              // which is what ties a clicked face back to its own grid.
+              face: MC.TRIM_FACES[f % 6],
               rect: [c[0].u * 64, c[0].v * 64, (c[3].u - c[0].u) * 64, (c[3].v - c[0].v) * 64]
             });
           }
@@ -306,7 +317,7 @@
       }
 
       const draw = () => {
-        const slot = this._trimSlot, grid = gridFor(slot);
+        const slot = this._trimSlot;
         ctx.clearRect(0, 0, cv.width, cv.height);
         ctx.fillStyle = '#26272b';
         ctx.fillRect(0, 0, cv.width, cv.height);
@@ -314,6 +325,7 @@
           for (const pf of projected(slot)) {
             const { f, sA, sB, sC } = pf;
             const [ru, rv, rw, rh] = f.rect;
+            const grid = gridFor(slot, f.face);
             for (let ty = 0; ty < G; ty++) {
               for (let tx = 0; tx < G; tx++) {
                 const idx = grid[ty * G + tx];
@@ -342,6 +354,7 @@
           // Flat items: the real icon at full size, painted over directly.
           const icon = TX.itemIcon(ICON_FOR[slot], cv.width, tier());
           ctx.drawImage(icon, 0, 0);
+          const grid = gridFor(slot, 'front');
           const cell = cv.width / G;
           ctx.globalAlpha = 0.85;
           for (let ty = 0; ty < G; ty++) {
@@ -371,7 +384,7 @@
         if (!is3D(slot)) {
           const cell = cv.width / G;
           const tx = Math.floor(mx / cell), ty = Math.floor(my / cell);
-          return (tx < 0 || ty < 0 || tx >= G || ty >= G) ? null : { tx, ty };
+          return (tx < 0 || ty < 0 || tx >= G || ty >= G) ? null : { tx, ty, face: 'front' };
         }
         let best = null;
         for (const { f, sA, sB, sC, depth } of projected(slot)) {
@@ -384,7 +397,7 @@
           const t = (ux * py - uy * px) / det;
           if (s < 0 || s > 1 || t < 0 || t > 1) continue;
           if (!best || depth < best.depth) {
-            best = { depth, tx: Math.min(G - 1, Math.floor(s * G)), ty: Math.min(G - 1, Math.floor(t * G)) };
+            best = { depth, face: f.face, tx: Math.min(G - 1, Math.floor(s * G)), ty: Math.min(G - 1, Math.floor(t * G)) };
           }
         }
         return best;
@@ -392,14 +405,21 @@
 
       const paintCell = hit => {
         if (!hit) return;
-        const grid = gridFor(this._trimSlot);
+        // Normally only the side actually clicked is painted. With "same on
+        // every side" ticked the stroke is copied round the whole piece,
+        // which is the quick way to get a repeating pattern.
+        const mirror = is3D(this._trimSlot) && hud.trimMirrorCheck && hud.trimMirrorCheck.checked;
+        const targets = mirror ? MC.TRIM_FACES : [hit.face];
         const half = (this._trimBrush - 1) / 2;
         const x0 = Math.round(hit.tx - half), y0 = Math.round(hit.ty - half);
-        for (let dy = 0; dy < this._trimBrush; dy++) {
-          for (let dx = 0; dx < this._trimBrush; dx++) {
-            const x = x0 + dx, y = y0 + dy;
-            if (x < 0 || y < 0 || x >= G || y >= G) continue;
-            grid[y * G + x] = this._trimColor;
+        for (const face of targets) {
+          const grid = gridFor(this._trimSlot, face);
+          for (let dy = 0; dy < this._trimBrush; dy++) {
+            for (let dx = 0; dx < this._trimBrush; dx++) {
+              const x = x0 + dx, y = y0 + dy;
+              if (x < 0 || y < 0 || x >= G || y >= G) continue;
+              grid[y * G + x] = this._trimColor;
+            }
           }
         }
         draw();
@@ -467,8 +487,9 @@
         this._trimSlot = slot;
         hud.trimTabs.querySelectorAll('.trimTab').forEach(b => b.classList.toggle('active', b.dataset.slot === slot));
         hud.trimRotateRow.classList.toggle('hidden', !is3D(slot));
+        if (hud.trimMirrorLabel) hud.trimMirrorLabel.classList.toggle('hidden', !is3D(slot));
         hud.trimHint.textContent = is3D(slot)
-          ? 'Click the model to paint. Right-drag (or shift-drag) to turn it.'
+          ? 'Click the model to paint - each side keeps its own design. Right-drag (or shift-drag) to turn it.'
           : 'Click to paint straight onto the item.';
         draw();
       };
@@ -479,7 +500,7 @@
       hud.trimRotR.addEventListener('click', () => { yaw += 0.4; draw(); });
 
       hud.trimClearBtn.addEventListener('click', () => {
-        this._trims[this._trimSlot] = blank();
+        this._trims[this._trimSlot] = {};
         saveTrims(this._trims);
         draw();
       });
@@ -504,8 +525,9 @@
         reader.onload = () => {
           try {
             const data = JSON.parse(reader.result);
-            // Also accepts the older two-grid export, mapping its single
-            // armor pattern onto every piece.
+            // Older exports are still accepted: a two-grid file maps its
+            // one armor pattern onto every piece, and a per-slot file of
+            // bare grids is spread across all six sides by sanitizeTrims.
             const legacy = MC.isValidTrim(data.armorTrim) || MC.isValidTrim(data.shieldTrim);
             const incoming = legacy
               ? { helmet: data.armorTrim, chest: data.armorTrim, legs: data.armorTrim, boots: data.armorTrim, shield: data.shieldTrim }
@@ -2684,7 +2706,7 @@
         const pose = poseFor(this.selfWalkPhase, this.swingT, heldItem, this.me.blocking);
         r.drawPlayer(this.mySkin, this.me.x, this.me.y, this.me.z, this.me.yaw, pose, [1, 1, 1], 1);
         r.drawArmorLayer(this.armorTier, this.me.x, this.me.y, this.me.z, this.me.yaw, pose, this.myTrims);
-        r.drawHeldItem(this.me.blocking ? r.getShieldTexture(this.myTrims && this.myTrims.shield) : r.getIconTexture(heldItem), this.me.blocking ? 0.85 : 0.4);
+        r.drawHeldItem(this.me.blocking ? r.getShieldTexture(this._trimFor('shield')) : r.getIconTexture(heldItem), this.me.blocking ? 0.85 : 0.4);
       }
 
       // remote players
@@ -2714,7 +2736,7 @@
         // So you can tell what a bot/remote player is actually fighting with -
         // and a raised shield takes visual priority over whatever's in the
         // main hand, same as the local first-person viewmodel does.
-        r.drawHeldItem(p.blocking ? r.getShieldTexture(p.trims && p.trims.shield) : r.getIconTexture(heldItem), p.blocking ? 0.85 : 0.4);
+        r.drawHeldItem(p.blocking ? r.getShieldTexture(p.trims && p.trims.shield && p.trims.shield.front) : r.getIconTexture(heldItem), p.blocking ? 0.85 : 0.4);
         this._drawNameTag(p);
         if (p.swingT !== undefined && p.swingT >= 0 && p.swingT < 0.001) p.swingT = 0.001;
         if (p.swingT > 0.4) p.swingT = -1;
@@ -2930,7 +2952,7 @@
         // this cache never needs to invalidate mid-match.
         if (!tex[key]) {
           const size = blocking ? global.MCTextures.SHIELD_ICON_SIZE : 64;
-          tex[key] = uploadCanvasTex(gl, global.MCTextures.itemIcon(key, size, null, blocking && this.myTrims ? this.myTrims.shield : null));
+          tex[key] = uploadCanvasTex(gl, global.MCTextures.itemIcon(key, size, null, blocking ? this._trimFor('shield') : null));
         }
         const vao = this._viewQuad || (this._viewQuad = quadVAO(gl));
         gl.useProgram(r.progEntity);

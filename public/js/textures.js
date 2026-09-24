@@ -534,7 +534,7 @@
   // skin, so it reads as "wearing plates" rather than "recolored".
   const ARMOR_COLORS = { leather: '#8a5a2e', iron: '#d3d5d8', diamond: '#3fd0c9', netherite: '#17161a' };
   const ARMOR_FLECKS = { leather: '#c9915a', iron: '#ffffff', diamond: '#c8fff9', netherite: '#6a5a52' };
-  function paintArmor(tier, pieceKey, grid) {
+  function paintArmor(tier, pieceKey, faceGrids) {
     const cv = document.createElement('canvas');
     cv.width = cv.height = 64;
     const g = cv.getContext('2d');
@@ -563,27 +563,30 @@
     // sides rather than being sliced up by the atlas layout. Index 0 ("no
     // paint") leaves the base tier texture showing through untouched, which
     // is also what makes the base visible underneath in the editor.
-    if (pieceKey && MC.isValidTrim(grid)) {
-      for (const rect of pieceFaceRects(pieceKey)) stampTrim(g, grid, rect);
+    if (pieceKey && faceGrids) {
+      for (const { face, rect } of pieceFaceRects(pieceKey)) {
+        if (MC.isValidTrim(faceGrids[face])) stampTrim(g, faceGrids[face], rect);
+      }
     }
     return cv;
   }
 
-  /** Every atlas face rect [u,v,w,h] belonging to one armor piece. Boots and
-   * leggings deliberately share the same rects - they get separate textures
-   * (see Renderer.getPieceArmorTexture), so the overlap never collides. */
+  /** Every atlas face rect belonging to one armor piece, tagged with which
+   * side it is so each can take its own painted grid. Boots and leggings
+   * deliberately share the same rects - they get separate textures (see
+   * Renderer.getPieceArmorTexture), so the overlap never collides. */
   const PIECE_PARTS = {
     helmet: ['head'],
     chest: ['body', 'armR', 'armL'],
     legs: ['legR', 'legL'],
     boots: ['legR', 'legL']
   };
-  const FACE_ORDER = ['front', 'back', 'left', 'right', 'top', 'bottom'];
+  const FACE_ORDER = MC.TRIM_FACES;
   function pieceFaceRects(pieceKey) {
     const out = [];
     for (const part of (PIECE_PARTS[pieceKey] || [])) {
       const uv = SKIN_PARTS[part];
-      for (const f of FACE_ORDER) out.push(uv[f]);
+      for (const face of FACE_ORDER) out.push({ face, rect: uv[face] });
     }
     return out;
   }
@@ -678,8 +681,8 @@
     return tex;
   }
 
-  function createArmorTexture(gl, tier, pieceKey, grid) {
-    return uploadNearest(gl, paintArmor(tier, pieceKey, grid));
+  function createArmorTexture(gl, tier, pieceKey, faceGrids) {
+    return uploadNearest(gl, paintArmor(tier, pieceKey, faceGrids));
   }
 
   /** Name plate rendered to a texture. Returns {tex, w, h, aspect}. */

@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "restart": "restart.bat",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "deploy": "deploy.bat"
   },
   "keywords": [],
   "author": "",

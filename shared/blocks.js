@@ -494,24 +494,42 @@
   }
 
   // Each armor piece is painted separately (see the customize-trims editor),
-  // so a player's trims are one grid per slot rather than a single pattern
-  // smeared over everything. Elytra and shield ride along as flat 2D items.
+  // and each SIDE of a piece separately again - so trims are
+  // {slot: {face: grid}} rather than one pattern smeared over everything.
+  // Elytra and shield are flat items and only ever use the 'front' face.
   var TRIM_SLOTS = ['helmet', 'chest', 'legs', 'boots', 'elytra', 'shield'];
+  var TRIM_FACES = ['front', 'back', 'left', 'right', 'top', 'bottom'];
 
-  /** Keeps only well-formed grids for known slots - anything else in a
+  /** Keeps only well-formed grids on known slots/faces - anything else in a
    * stale/tampered payload is dropped rather than trusted. Returns null when
-   * nothing survives, so "no trims" is one value instead of an empty object. */
+   * nothing survives, so "no trims" is one value instead of an empty object.
+   * A slot given as a single bare grid (the older all-sides-the-same format)
+   * is accepted and spread across every face. */
   function sanitizeTrims(trims) {
     if (!trims || typeof trims !== 'object') return null;
-    var out = null;
-    for (var i = 0; i < TRIM_SLOTS.length; i++) {
-      var slot = TRIM_SLOTS[i];
-      if (isValidTrim(trims[slot])) {
-        if (!out) out = {};
-        out[slot] = trims[slot];
+    var out = null, i, j;
+    for (i = 0; i < TRIM_SLOTS.length; i++) {
+      var slot = TRIM_SLOTS[i], val = trims[slot], faces = null;
+      if (isValidTrim(val)) {
+        faces = {};
+        for (j = 0; j < TRIM_FACES.length; j++) faces[TRIM_FACES[j]] = val;
+      } else if (val && typeof val === 'object') {
+        for (j = 0; j < TRIM_FACES.length; j++) {
+          if (!isValidTrim(val[TRIM_FACES[j]])) continue;
+          if (!faces) faces = {};
+          faces[TRIM_FACES[j]] = val[TRIM_FACES[j]];
+        }
       }
+      if (faces) { if (!out) out = {}; out[slot] = faces; }
     }
     return out;
+  }
+
+  /** True if this slot's face map has at least one painted side. */
+  function hasAnyTrim(faces) {
+    if (!faces) return false;
+    for (var i = 0; i < TRIM_FACES.length; i++) if (isValidTrim(faces[TRIM_FACES[i]])) return true;
+    return false;
   }
 
   var COMBAT = {
@@ -894,8 +912,10 @@
     TRIM_CELLS: TRIM_CELLS,
     TRIM_PALETTE: TRIM_PALETTE,
     TRIM_SLOTS: TRIM_SLOTS,
+    TRIM_FACES: TRIM_FACES,
     isValidTrim: isValidTrim,
     sanitizeTrims: sanitizeTrims,
+    hasAnyTrim: hasAnyTrim,
     COMBAT: COMBAT,
     PHYS: PHYS,
     breakTime: breakTime,
