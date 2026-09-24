@@ -164,6 +164,16 @@
         <option value="frost">Frostbite - a glass keep on a frozen lake</option>
       </select>
       <p class="sub">Only applies when you're the only player - otherwise use /arena in chat.</p>
+      <label>Tipped arrows</label>
+      <select id="arrowTipSelect">
+        <option value="none" selected>Normal - no effect</option>
+        <option value="poison">Poison - heaviest damage over time, but never kills</option>
+        <option value="harming">Instant Harming - extra damage the moment it lands</option>
+        <option value="wither">Wither - damage over time that can finish someone off</option>
+        <option value="slowness">Slowness - cripples their movement speed</option>
+        <option value="slowfall">Slow Falling - floats them down, no fall damage</option>
+        <option value="weakness">Weakness - weakens the melee damage they deal</option>
+      </select>
       <label class="checkline"><input type="checkbox" id="customLoadoutCheck"> Use a custom loadout instead (pick your own items below)</label>
       <div id="customItemsList" class="hidden itemchecklist"></div>
       <label class="checkline"><input type="checkbox" id="netheriteArmorCheck"> Use netherite armor instead of diamond (knockback/fall/blast resistance, a little extra protection)</label>

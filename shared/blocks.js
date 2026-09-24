@@ -584,6 +584,19 @@
     return out;
   }
 
+  // Every tipped-arrow option, in menu order. `none` is a plain arrow.
+  var ARROW_TIPS = {
+    none: { key: 'none', name: 'Normal', desc: 'No effect' },
+    poison: { key: 'poison', name: 'Poison', desc: 'Heavy damage over time, but never kills' },
+    harming: { key: 'harming', name: 'Instant Harming', desc: 'Extra damage the moment it lands' },
+    wither: { key: 'wither', name: 'Wither', desc: 'Damage over time that can finish someone off' },
+    slowness: { key: 'slowness', name: 'Slowness', desc: 'Cripples their movement speed' },
+    slowfall: { key: 'slowfall', name: 'Slow Falling', desc: 'Floats them down - no fall damage' },
+    weakness: { key: 'weakness', name: 'Weakness', desc: 'Weakens the damage they deal' }
+  };
+  var ARROW_TIP_KEYS = ['none', 'poison', 'harming', 'wither', 'slowness', 'slowfall', 'weakness'];
+  function arrowTipKey(key) { return ARROW_TIPS[key] ? key : 'none'; }
+
   /** True if this slot's face map has at least one painted side. */
   function hasAnyTrim(faces) {
     if (!faces) return false;
@@ -604,6 +617,29 @@
     // this share of its raw damage. Shields are applied after the cap and
     // can still stop a hit outright - that's active defence, not a stat.
     MAX_DAMAGE_REDUCTION: 0.85,
+
+    // ------------------------------------------------------ tipped arrows --
+    // Picked once at the menu (see ARROW_TIPS / the arrow-tip select) and
+    // applied by every arrow you land. Damage-over-time tips tick once a
+    // second, like burning.
+    // Poison is the heaviest damage of the lot but can never land the
+    // killing blow - it always leaves its target on 1 health, so it softens
+    // someone up rather than finishing them. Wither hits for less in total
+    // but *will* kill, which is the trade.
+    POISON_DPS: 1.4,
+    POISON_SECONDS: 8,
+    WITHER_DPS: 0.9,
+    WITHER_SECONDS: 8,
+    WEAKNESS_DMG_MULT: 0.55,   // outgoing melee while weakened
+    WEAKNESS_SECONDS: 10,
+    ARROW_SLOWNESS_LEVEL: 4,
+    ARROW_SLOWNESS_SECONDS: 8,
+    SLOW_FALL_GRAVITY_MULT: 0.28,
+    SLOW_FALL_SECONDS: 10,
+    ARROW_HARMING_DAMAGE: 6,
+    // Explosives caught in a blast go off a beat later rather than
+    // instantly, so a chain reaction visibly spreads outward.
+    CHAIN_DELAY_SECONDS: 0.35,
     REGEN_DELAY: 5.0,
     REGEN_INTERVAL: 2.5,
     SPAWN_PROTECT: 2.5,
@@ -735,12 +771,16 @@
     // game, so "walk over and grab it" is simulated as a cooldown instead).
     // Riptide launches the thrower instead of throwing the trident at all.
     // Channeling and Impaling are flat bonuses on a landed throw.
-    TRIDENT_SPEED: 32,
+    TRIDENT_SPEED: 46,
     TRIDENT_GRAVITY: 14,
     TRIDENT_THROW_DAMAGE: 9,
-    TRIDENT_COOLDOWN_WITH_LOYALTY: 0.9,
-    TRIDENT_COOLDOWN_NO_LOYALTY: 4.5,
+    TRIDENT_COOLDOWN_WITH_LOYALTY: 0.45,
+    TRIDENT_COOLDOWN_NO_LOYALTY: 1.8,
     TRIDENT_RIPTIDE_SPEED: 18,
+    // Riptide normally needs you to be wet. Mid-glide counts too, so a
+    // trident is a usable burst of speed while flying rather than dead
+    // weight the moment your feet leave the ground.
+    TRIDENT_RIPTIDE_GLIDE_SPEED: 22,
     TRIDENT_CHANNELING_KB: 1.6,
     TRIDENT_IMPALING_BONUS_DMG: 5,
 
@@ -840,7 +880,9 @@
     // of immediately getting clamped back down to the same slow cap -
     // fireworks are the actual reason to fly fast, not gliding alone.
     ELYTRA_GLIDE_GRAVITY: 7,
-    ELYTRA_MAX_SPEED: 14,
+    // Unboosted gliding is deliberately slow - a firework is what makes an
+    // elytra fast, not the wings on their own.
+    ELYTRA_MAX_SPEED: 9,
     ELYTRA_BOOST_MAX_SPEED: 30,
     ELYTRA_BOOST_WINDOW: 2.2,
     ELYTRA_DRAG: 0.985,
@@ -983,6 +1025,9 @@
     isValidTrim: isValidTrim,
     sanitizeTrims: sanitizeTrims,
     hasAnyTrim: hasAnyTrim,
+    ARROW_TIPS: ARROW_TIPS,
+    ARROW_TIP_KEYS: ARROW_TIP_KEYS,
+    arrowTipKey: arrowTipKey,
     SHOP: SHOP,
     SHOP_KEYS: SHOP_KEYS,
     shopEffect: shopEffect,

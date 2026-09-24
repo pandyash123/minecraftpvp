@@ -14,7 +14,7 @@
     on(evt, fn) { (this.handlers[evt] = this.handlers[evt] || []).push(fn); return this; }
     emit2(evt, data) { (this.handlers[evt] || []).forEach(fn => fn(data)); }
 
-    connect(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena) {
+    connect(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena, arrowTip) {
       return new Promise((resolve, reject) => {
         const socket = io({ transports: ['websocket', 'polling'] });
         this.socket = socket;
@@ -22,7 +22,7 @@
 
         socket.on('connect', () => {
           this.connected = true;
-          socket.emit('join', { name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena }, () => {
+          socket.emit('join', { name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena, arrowTip }, () => {
             clearTimeout(timeout);
           });
         });

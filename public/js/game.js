@@ -8,7 +8,12 @@
   const ITEMS = MC.ITEMS;
   const CH = W.CHUNK;
   const TAU = Math.PI * 2;
-  const EFFECT_NAME = { strength: 'Strength', speed: 'Speed', slowness: 'Slowness', resistance: 'Resistance', fireResistance: 'Fire Resistance', regeneration: 'Regeneration' };
+  const EFFECT_NAME = {
+    strength: 'Strength', speed: 'Speed', slowness: 'Slowness', resistance: 'Resistance',
+    fireResistance: 'Fire Resistance', regeneration: 'Regeneration',
+    // Tipped-arrow effects (see MC.ARROW_TIPS).
+    poison: 'Poison', wither: 'Wither', weakness: 'Weakness', slowFalling: 'Slow Falling'
+  };
   const ROMAN = ['', 'I', 'II', 'III', 'IV', 'V', 'VI'];
   // Which potion's icon represents each active-effect kind in the HUD -
   // Slowness/Resistance both come from Turtle Master, the only potion that
@@ -30,7 +35,7 @@
         killfeed: el('killfeed'), ammo: el('ammoText'), fps: el('fps'), ping: el('pingText'), viewModeBtn: el('viewModeBtn'),
         chargeWrap: el('chargeWrap'), chargeFill: el('chargeFill'),
         menu: el('menu'), nameInput: el('nameInput'), playBtn: el('playBtn'), botsInput: el('botsInput'),
-        kitSelect: el('kitSelect'), botKitSelect: el('botKitSelect'), arenaSelect: el('arenaSelect'),
+        kitSelect: el('kitSelect'), botKitSelect: el('botKitSelect'), arenaSelect: el('arenaSelect'), arrowTipSelect: el('arrowTipSelect'),
         botWeaponSelect: el('botWeaponSelect'), botTeamCheck: el('botTeamCheck'), botHacksCheck: el('botHacksCheck'),
         difficultySelect: el('difficultySelect'), armorSelect: el('armorSelect'), dummyCheck: el('dummyCheck'),
         dummyShieldCheck: el('dummyShieldCheck'),
@@ -138,6 +143,8 @@
       if (savedKit && this.hud.kitSelect) this.hud.kitSelect.value = savedKit;
       const savedArena = localStorage.getItem('mc_arena');
       if (savedArena && this.hud.arenaSelect) this.hud.arenaSelect.value = savedArena;
+      const savedTip = localStorage.getItem('mc_arrowTip');
+      if (savedTip && this.hud.arrowTipSelect) this.hud.arrowTipSelect.value = savedTip;
       this.hud.playBtn.addEventListener('click', () => this._startFromMenu());
       this.hud.nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') this._startFromMenu(); });
       this.hud.resetTerrainBtn.addEventListener('click', () => this._resetTerrainFromMenu());
@@ -714,10 +721,12 @@
       const trims = loadTrims();
       const arena = this.hud.arenaSelect ? this.hud.arenaSelect.value : 'classic';
       localStorage.setItem('mc_arena', arena);
+      const arrowTip = this.hud.arrowTipSelect ? this.hud.arrowTipSelect.value : 'none';
+      localStorage.setItem('mc_arrowTip', arrowTip);
       this.hud.menu.classList.add('hidden');
       this.hud.loading.classList.remove('hidden');
       global.MCSound.resume();
-      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena).catch(err => {
+      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena, arrowTip).catch(err => {
         console.error(err);
         this.hud.loading.classList.add('hidden');
         this.hud.menu.classList.remove('hidden');
@@ -725,7 +734,7 @@
       });
     }
 
-    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena) {
+    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena, arrowTip) {
       // Drives the armor-piece icon color in the inventory (see
       // _buildInventoryUI/_renderChestSlot) - the human player's own tier
       // isn't part of `this.me` (only remote players carry .armor, from
@@ -741,7 +750,7 @@
       // speed) - combat-relevant enchants are already re-validated server-side
       // regardless of what this holds.
       this.myEnchants = enchantOpts || MC.defaultEnchantOpts();
-      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, this.myTrims, arena);
+      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, this.myTrims, arena, arrowTip);
       this.world = new global.MCWorld(init.seed, init.arena);
       this.world.applyEdits(init.edits || []);
       // The WebGL context (and everything already uploaded into it - block
@@ -2171,6 +2180,10 @@
       // worked out to, so it stacks with Speed and is still blunted by
       // Slowness rather than cancelling it.
       speedMult *= MC.shopEffect('speed', this.shop && this.shop.upgrades && this.shop.upgrades.speed);
+      // Slow Falling (tipped arrow): lighter gravity, and the server waives
+      // the fall damage separately - see its trackFall check.
+      const slowFall = this.activeEffects.slowFalling;
+      const gravityMult = (slowFall && nowMs < slowFall.until) ? C.SLOW_FALL_GRAVITY_MULT : 1;
 
       // Elytra: jump while airborne starts a glide - matches vanilla's
       // forgiving activation (you don't need to already be falling fast,
@@ -2186,7 +2199,7 @@
       const wasGround = this.me.onGround;
       const prevY = this.me.y;
       Physics.step((x, y, z) => this.world.get(x, y, z), this.me,
-        { forward, strafe, jump, sneak: this.me.sneak, sprint: this.me.sprint, block: this.me.blocking, yaw: this.yaw, pitch: this.pitch, dashing: lunging, glide: this.gliding, speedMult, boosted: performance.now() / 1000 < (this._boostedUntil || 0) }, dt);
+        { forward, strafe, jump, sneak: this.me.sneak, sprint: this.me.sprint, block: this.me.blocking, yaw: this.yaw, pitch: this.pitch, dashing: lunging, glide: this.gliding, speedMult, gravityMult, boosted: performance.now() / 1000 < (this._boostedUntil || 0) }, dt);
 
       if (!wasGround && this.me.onGround) {
         const fell = prevY - this.me.y;

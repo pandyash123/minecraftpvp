@@ -347,7 +347,7 @@ function baseWeaponKey(key) {
   return key === 'netherite_sword' ? 'sword' : key === 'netherite_axe' ? 'axe' : key;
 }
 
-function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, swordTier, axeTier, dogArmor, trims) {
+function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, swordTier, axeTier, dogArmor, trims, arrowTip) {
   const s = pick(spawns);
   // A custom loadout is human-only, and only every key that's actually a
   // real ITEMS entry - anything else (a stale/tampered client) is silently
@@ -382,6 +382,9 @@ function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, s
     trims: isBot ? null : MC.sanitizeTrims(trims),
     // In-match shop (see the 'shopBuy' handler). Bots never buy anything,
     // so their levels stay at zero and every effect below resolves to 1.
+    // Which tipped arrow this player's bow/crossbow fires (menu choice).
+    arrowTip: MC.arrowTipKey(arrowTip),
+    lastPoisonTick: 0, lastWitherTick: 0,
     coins: isBot ? 0 : MC.SHOP.START_COINS,
     upgrades: MC.freshUpgrades(),
     lastCoinTick: now(),
@@ -573,6 +576,42 @@ function applyPotionEffect(p, item, t) {
       io.emit('hp', { id: p.id, health: p.health, absorption: p.absorption });
       break;
   }
+}
+
+/**
+ * Applies the shooter's chosen tipped-arrow effect to whoever an arrow just
+ * hit. Instant Harming lands as damage straight away; everything else is a
+ * timed effect the tick loop (poison/wither) or the victim's own movement
+ * (slowness/slow falling) picks up from here.
+ */
+function applyArrowTip(victim, shooter, t) {
+  const tip = MC.arrowTipKey(shooter && shooter.arrowTip);
+  if (tip === 'none') return;
+  switch (tip) {
+    case 'poison':
+      victim.effects.poison = { level: 1, until: t + C.POISON_SECONDS };
+      break;
+    case 'wither':
+      victim.effects.wither = { level: 1, until: t + C.WITHER_SECONDS };
+      break;
+    case 'slowness':
+      victim.effects.slowness = { level: C.ARROW_SLOWNESS_LEVEL, until: t + C.ARROW_SLOWNESS_SECONDS };
+      delete victim.effects.speed;
+      break;
+    case 'slowfall':
+      victim.effects.slowFalling = { level: 1, until: t + C.SLOW_FALL_SECONDS };
+      break;
+    case 'weakness':
+      victim.effects.weakness = { level: 1, until: t + C.WEAKNESS_SECONDS };
+      break;
+    case 'harming':
+      // Instant, and unreduced by armor - 'harming' isn't in applyDamage's
+      // armor-reduction cause list, same as the other magic damage here.
+      applyDamage(victim, C.ARROW_HARMING_DAMAGE, shooter, 'harming', 0, 0, 0);
+      return;
+  }
+  if (victim.socket) victim.socket.emit('effects', effectsSnapshot(victim, t));
+  io.emit('effect', { kind: 'tip', tip, x: victim.x, y: victim.y + 1.2, z: victim.z });
 }
 
 /** Every currently-running effect on `p`, as {level, remaining-seconds} -
@@ -958,6 +997,62 @@ function explodeFirework(ownerId, x, y, z) {
  * and clears blocks in a rough sphere - never bedrock, never past the
  * world's edges. `ownerId` is whoever lit the fuse, purely for the kill
  * feed/attribution; friendly fire applies same as every other weapon here. */
+/**
+ * The block half of every explosion, shared by TNT, end crystals and
+ * respawn anchors so they all treat the world the same way.
+ *
+ * Respawn anchors are blast-proof: they survive any explosion, including
+ * another anchor's, which makes them the one thing you can build a charging
+ * emplacement out of and expect to still be standing afterwards.
+ *
+ * Anything explosive caught in the radius is queued to go off shortly after
+ * rather than detonating inline - that's what makes a chain reaction spread
+ * outward in visible steps instead of recursing through the whole field in
+ * a single tick (and blowing the stack doing it).
+ */
+function blastBlocks(x, y, z, radius, ownerId, opts) {
+  const spare = (opts && opts.spare) || null;
+  const r = Math.ceil(radius);
+  const bx0 = Math.floor(x), by0 = Math.floor(y), bz0 = Math.floor(z);
+  for (let by = -r; by <= r; by++) {
+    for (let bz = -r; bz <= r; bz++) {
+      for (let bx = -r; bx <= r; bx++) {
+        if (Math.hypot(bx, by, bz) > radius) continue;
+        const wx = bx0 + bx, wy = by0 + by, wz = bz0 + bz;
+        if (!inBounds(wx, wy, wz)) continue;
+        if (spare && spare(bx, by, bz)) continue;
+        const cur = getBlock(wx, wy, wz);
+        if (cur === ID.AIR || MC.HARDNESS[cur] < 0) continue;
+        // Blast-proof: an anchor is never destroyed or set off by a blast.
+        if (cur === ID.RESPAWN_ANCHOR) continue;
+        if (cur === ID.END_CRYSTAL) { queueChain('crystal', wx, wy, wz, ownerId); continue; }
+        if (cur === ID.TNT || cur === ID.TNT_MINECART) { igniteTNTBlock(wx, wy, wz, ownerId); continue; }
+        if (setBlock(wx, wy, wz, ID.AIR)) io.emit('block', { x: wx, y: wy, z: wz, id: ID.AIR, by: ownerId });
+      }
+    }
+  }
+}
+
+/** Explosives waiting to go off as part of a chain (see blastBlocks). */
+let pendingChain = [];
+function queueChain(kind, x, y, z, ownerId) {
+  if (pendingChain.some(c => c.x === x && c.y === y && c.z === z)) return;
+  pendingChain.push({ kind, x, y, z, ownerId, at: now() + C.CHAIN_DELAY_SECONDS });
+}
+function stepChain(t) {
+  if (!pendingChain.length) return;
+  const due = pendingChain.filter(c => t >= c.at);
+  if (!due.length) return;
+  pendingChain = pendingChain.filter(c => t < c.at);
+  for (const c of due) {
+    // It may have been mined or blown away in the meantime.
+    if (getBlock(c.x, c.y, c.z) !== ID.END_CRYSTAL) continue;
+    setBlock(c.x, c.y, c.z, ID.AIR);
+    io.emit('block', { x: c.x, y: c.y, z: c.z, id: ID.AIR, by: c.ownerId });
+    detonateEndCrystal(c.x, c.y, c.z, c.ownerId);
+  }
+}
+
 function explodeTNT(x, y, z, radius, dmg, kb, ownerId) {
   const owner = players.get(ownerId) || null;
   for (const p of players.values()) {
@@ -972,20 +1067,7 @@ function explodeTNT(x, y, z, radius, dmg, kb, ownerId) {
     const kbY = 0.4 + falloff * 0.9;
     applyDamage(p, Math.round(dmg * falloff), owner, 'tnt', kbX, kbZ, kbY);
   }
-  const r = Math.ceil(radius);
-  const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
-  for (let by = -r; by <= r; by++) {
-    for (let bz = -r; bz <= r; bz++) {
-      for (let bx = -r; bx <= r; bx++) {
-        if (Math.hypot(bx, by, bz) > radius) continue;
-        const wx = cx + bx, wy = cy + by, wz = cz + bz;
-        if (!inBounds(wx, wy, wz)) continue;
-        const cur = getBlock(wx, wy, wz);
-        if (cur === ID.AIR || MC.HARDNESS[cur] < 0) continue;
-        if (setBlock(wx, wy, wz, ID.AIR)) io.emit('block', { x: wx, y: wy, z: wz, id: ID.AIR, by: ownerId });
-      }
-    }
-  }
+  blastBlocks(x, y, z, radius, ownerId);
   io.emit('effect', { kind: 'explosion', x, y, z, radius });
 }
 
@@ -1010,21 +1092,11 @@ function detonateEndCrystal(x, y, z, ownerId) {
     const dmg = (p.y + 0.9) >= cy ? Math.round(C.CRYSTAL_BLAST_DMG_MAX * falloff) : C.CRYSTAL_BLAST_DMG_BELOW;
     applyDamage(p, dmg, owner, 'crystal', kbX, kbZ, kbY);
   }
-  const r = Math.ceil(C.CRYSTAL_BLAST_RADIUS);
-  const bx0 = Math.floor(x), by0 = Math.floor(y), bz0 = Math.floor(z);
-  for (let by = -r; by <= r; by++) {
-    for (let bz = -r; bz <= r; bz++) {
-      for (let bxx = -r; bxx <= r; bxx++) {
-        if (Math.hypot(bxx, by, bz) > C.CRYSTAL_BLAST_RADIUS) continue;
-        const wx = bx0 + bxx, wy = by0 + by, wz = bz0 + bz;
-        if (!inBounds(wx, wy, wz)) continue;
-        if (by === -1 && bxx === 0 && bz === 0) continue; // spare the obsidian it stood on
-        const cur = getBlock(wx, wy, wz);
-        if (cur === ID.AIR || MC.HARDNESS[cur] < 0) continue;
-        if (setBlock(wx, wy, wz, ID.AIR)) io.emit('block', { x: wx, y: wy, z: wz, id: ID.AIR, by: ownerId });
-      }
-    }
-  }
+  // Spare the obsidian it stood on, same as vanilla, so another crystal
+  // can go straight back up on the same spot.
+  blastBlocks(x, y, z, C.CRYSTAL_BLAST_RADIUS, ownerId, {
+    spare: (bx, by, bz) => by === -1 && bx === 0 && bz === 0
+  });
   io.emit('effect', { kind: 'crystal', x: cx, y: cy, z: cz, radius: C.CRYSTAL_BLAST_RADIUS });
 }
 
@@ -1046,20 +1118,10 @@ function detonateAnchor(x, y, z, ownerId) {
     const kbY = 0.5 + falloff * 1.4;
     applyDamage(p, Math.round(C.ANCHOR_BLAST_DMG * falloff), owner, 'anchor', kbX, kbZ, kbY);
   }
-  const r = Math.ceil(C.ANCHOR_BLAST_RADIUS);
-  const bx0 = Math.floor(x), by0 = Math.floor(y), bz0 = Math.floor(z);
-  for (let by = -r; by <= r; by++) {
-    for (let bz = -r; bz <= r; bz++) {
-      for (let bxx = -r; bxx <= r; bxx++) {
-        if (Math.hypot(bxx, by, bz) > C.ANCHOR_BLAST_RADIUS) continue;
-        const wx = bx0 + bxx, wy = by0 + by, wz = bz0 + bz;
-        if (!inBounds(wx, wy, wz)) continue;
-        const cur = getBlock(wx, wy, wz);
-        if (cur === ID.AIR || MC.HARDNESS[cur] < 0) continue;
-        if (setBlock(wx, wy, wz, ID.AIR)) io.emit('block', { x: wx, y: wy, z: wz, id: ID.AIR, by: ownerId });
-      }
-    }
-  }
+  // The anchor that just went off is cleared explicitly - blastBlocks
+  // deliberately spares anchors, including this one.
+  if (setBlock(x, y, z, ID.AIR)) io.emit('block', { x, y, z, id: ID.AIR, by: ownerId });
+  blastBlocks(x, y, z, C.ANCHOR_BLAST_RADIUS, ownerId);
   anchorCharges.delete(x + ',' + y + ',' + z);
   io.emit('effect', { kind: 'anchor', x: cx, y: cy, z: cz, radius: C.ANCHOR_BLAST_RADIUS });
 }
@@ -1179,6 +1241,9 @@ function stepProjectiles(dt) {
             let kbMul = isSelfHit ? C.BOW_BOOST_KB_MULT : 0.5;
             if (isBowShot && owner && hasEnchant(owner, 'bow', 'punch')) kbMul += C.PUNCH_ENCHANT_ADD;
             applyDamage(hit.player, Math.round(dmg), owner, 'arrow', (hx / hl) * kbMul, (hz / hl) * kbMul, isSelfHit ? C.BOW_BOOST_KB_Y : 0.36);
+            // Tipped arrows land their effect on top of the hit itself -
+            // but never on the shooter via a bow-boost self-hit.
+            if (!isSelfHit && hit.player.alive) applyArrowTip(hit.player, owner, t);
             if (pr.burning || (isBowShot && owner && hasEnchant(owner, 'bow', 'flame'))) ignitePlayer(hit.player, t);
             if (owner && owner.socket) owner.socket.emit('arrowHit', { id: hit.player.id, dist: Math.hypot(hit.player.x - owner.x, hit.player.z - owner.z) });
           } else if (pr.kind === 'pearl') {
@@ -1859,7 +1924,10 @@ function trackFall(p, prevY, wasGround) {
       // A powder snow bucket clutch works the same way water already does:
       // non-solid, so you fall straight through to solid ground - if that
       // ground still has powder snow sitting on it where you land, no damage.
-      if (!glided && dist > C.FALL_SAFE && !Physics.inWater(getBlock, p.x, p.y, p.z) &&
+      // Slow Falling waives the damage outright, same as gliding or landing
+      // in powder snow - that's the whole point of the tipped arrow.
+      const floating = !!activeEffect(p, 'slowFalling', now());
+      if (!glided && !floating && dist > C.FALL_SAFE && !Physics.inWater(getBlock, p.x, p.y, p.z) &&
           getBlock(Math.floor(p.x), Math.floor(p.y + 0.1), Math.floor(p.z)) !== ID.POWDER_SNOW) {
         // Feather Falling isn't a real enchant here - netherite's fallResist
         // fills that role instead.
@@ -1917,6 +1985,28 @@ function tick() {
       if (p.socket) p.socket.emit('heal', { health: p.health, absorption: p.absorption });
       io.emit('hp', { id: p.id, health: p.health, absorption: p.absorption });
     }
+    // Poison: the heaviest tipped-arrow damage, but it can never land the
+    // killing blow - always leaves its target on 1 health. Applied directly
+    // rather than through applyDamage so that floor is guaranteed, and so
+    // it bypasses armor the way magic damage should.
+    const poison = activeEffect(p, 'poison', t);
+    if (poison && t - p.lastPoisonTick >= 1) {
+      p.lastPoisonTick = t;
+      const bite = Math.min(C.POISON_DPS * poison.level, Math.max(0, p.health - 1));
+      if (bite > 0) {
+        p.health = Math.round((p.health - bite) * 10) / 10;
+        p.lastDamage = t;
+        if (p.socket) p.socket.emit('hurt', { health: p.health, absorption: p.absorption, amount: bite, cause: 'poison', blocked: false });
+        io.emit('hp', { id: p.id, health: p.health, absorption: p.absorption });
+      }
+    }
+    // Wither: less total damage than poison, but it will finish you off.
+    const wither = activeEffect(p, 'wither', t);
+    if (wither && t - p.lastWitherTick >= 1) {
+      p.lastWitherTick = t;
+      applyDamage(p, C.WITHER_DPS * wither.level, null, 'wither', 0, 0, 0);
+    }
+
     // Fire Aspect / Flame: burning ticks once a second while p.burnUntil is
     // in the future, bypassing armor (a status effect, not a weapon hit) -
     // Fire Resistance blocks it outright.
@@ -1975,6 +2065,7 @@ function tick() {
   for (const w of wolves.values()) stepWolf(w, dt, t);
 
   // TNT / TNT Minecart fuses - explode anything whose timer has run out.
+  stepChain(t);
   if (liveTNT.length) {
     const stillLit = [];
     for (const fuse of liveTNT) {
@@ -2111,7 +2202,7 @@ io.on('connection', socket => {
     // A lone player rejoining also gets whatever arena they picked at the
     // menu - with nobody else around there's nothing to disrupt.
     if (![...players.values()].some(p => !p.bot)) resetWorld(data && data.arena);
-    me = makePlayer(socket.id, name, false, data && data.armor, kit, data && data.customItems, data && data.enchantOpts, data && data.swordTier, data && data.axeTier, data && data.dogArmor, data && data.trims);
+    me = makePlayer(socket.id, name, false, data && data.armor, kit, data && data.customItems, data && data.enchantOpts, data && data.swordTier, data && data.axeTier, data && data.dogArmor, data && data.trims, data && data.arrowTip);
     me.socket = socket;
     players.set(me.id, me);
 
@@ -2251,6 +2342,10 @@ io.on('connection', socket => {
     }
     const str = activeEffect(me, 'strength', t);
     if (str) dmg += C.STRENGTH_DMG_PER_LEVEL * str.level;
+    // Weakness (tipped arrow) saps melee specifically, the way it does in
+    // vanilla - bows and thrown things are unaffected.
+    const weak = activeEffect(me, 'weakness', t);
+    if (weak) dmg *= C.WEAKNESS_DMG_MULT;
     // Sharpness V (sword/axe) and Knockback III (sword) are opt-in toggles -
     // see ENCHANT_DEFS / the menu's Enchantments panel.
     if ((weaponKey === 'sword' || weaponKey === 'axe') && hasEnchant(me, weaponKey, 'sharpness')) dmg += C.SHARPNESS_DMG_BONUS;
@@ -2392,8 +2487,12 @@ io.on('connection', socket => {
       // it" is simulated as a cooldown instead.
       const t = now();
       if (t < (me.tridentAvailableAt || 0)) return;
-      if (hasEnchant(me, 'trident', 'riptide') && isWet(me) && !me.sneak) {
-        const vx = dir[0] * C.TRIDENT_RIPTIDE_SPEED, vy = Math.max(dir[1], 0.3) * C.TRIDENT_RIPTIDE_SPEED, vz = dir[2] * C.TRIDENT_RIPTIDE_SPEED;
+      // Riptide fires when you're wet OR mid-glide - an elytra counts as a
+      // launch surface, so a trident is a burst of speed while flying
+      // instead of dead weight the moment you leave the ground.
+      if (hasEnchant(me, 'trident', 'riptide') && (isWet(me) || me.gliding) && !me.sneak) {
+        const speed = me.gliding ? C.TRIDENT_RIPTIDE_GLIDE_SPEED : C.TRIDENT_RIPTIDE_SPEED;
+        const vx = dir[0] * speed, vy = Math.max(dir[1], me.gliding ? -0.2 : 0.3) * speed, vz = dir[2] * speed;
         me.vx += vx; me.vy = Math.max(me.vy, vy); me.vz += vz;
         me.tridentAvailableAt = t + C.TRIDENT_COOLDOWN_WITH_LOYALTY;
         socket.emit('launch', { vx, vy, vz });
@@ -2496,7 +2595,12 @@ io.on('connection', socket => {
       const key = BLOCK_ITEM_KEY[id];
       if (key && !playerHasItem(me, key)) return;
       // TNT Minecart can only be set down directly on top of a rail.
-      if (id === ID.TNT_MINECART && getBlock(x, y - 1, z) !== ID.RAIL) return;
+      // A TNT Minecart needs something to sit on: a rail, or obsidian for
+      // blast-proof emplacements that survive their own neighbours going off.
+      if (id === ID.TNT_MINECART) {
+        const under = getBlock(x, y - 1, z);
+        if (under !== ID.RAIL && under !== ID.OBSIDIAN) return;
+      }
       // End Crystal can only be set down directly on top of obsidian.
       if (id === ID.END_CRYSTAL && getBlock(x, y - 1, z) !== ID.OBSIDIAN) return;
       // never let someone build inside a player

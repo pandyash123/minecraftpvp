@@ -167,7 +167,7 @@
     if (web) {
       // Vanilla-style web behaviour: falling and jumping are both smothered,
       // not just horizontal movement.
-      e.vy -= PHYS.GRAVITY * dt;
+      e.vy -= PHYS.GRAVITY * (input.gravityMult === undefined ? 1 : input.gravityMult) * dt;
       e.vy = Math.max(e.vy, -1.4);
       if (input.jump && e.onGround) e.vy = PHYS.JUMP * 0.35;
     } else if (water) {
@@ -201,7 +201,7 @@
         e.vx *= s; e.vy *= s; e.vz *= s;
       }
     } else {
-      e.vy -= PHYS.GRAVITY * dt;
+      e.vy -= PHYS.GRAVITY * (input.gravityMult === undefined ? 1 : input.gravityMult) * dt;
       if (input.jump && e.onGround) e.vy = PHYS.JUMP;
     }
     if (e.vy < -PHYS.TERMINAL) e.vy = -PHYS.TERMINAL;
