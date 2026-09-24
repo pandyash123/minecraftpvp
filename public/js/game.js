@@ -68,6 +68,7 @@
       this.me = null;               // {id, x,y,z,vx,vy,vz,yaw,pitch,onGround,...}
       this.remote = new Map();      // id -> remote player render state
       this.wolves = new Map();      // id -> {id, ownerId, name, x,y,z,yaw, health, maxHealth, alive, hasArmor}
+      this.creepers = new Map();    // id -> {id, x,y,z,yaw, charged, fuse, health, maxHealth}
       this.projectiles = new Map();
       this.particlesMeta = [];      // {x,y,z,vx,vy,vz,r,g,b,a,size,life}
       this._groundFires = [];       // {x,y,z,until} - cosmetic only, see 'groundfire' effect
@@ -803,6 +804,8 @@
       for (const p of init.players) if (p.id !== this.me.id) this._ensureRemote(p);
       this.wolves.clear();
       for (const w of (init.wolves || [])) this.wolves.set(w.id, w);
+      this.creepers.clear();
+      for (const c of (init.creepers || [])) this.creepers.set(c.id, c);
       // Input/net handlers are wired to this persistent Game instance once
       // ever - re-wiring on every session would stack duplicate listeners
       // and fire everything N times after N replays.
@@ -1059,6 +1062,15 @@
         this.projectiles.delete(d.id);
       });
       net.on('snapshot', s => this._applySnapshot(s));
+      net.on('creeperSpawn', c => { this.creepers.set(c.id, c); });
+      net.on('creeperState', c => {
+        const cur = this.creepers.get(c.id);
+        if (cur) Object.assign(cur, c); else this.creepers.set(c.id, c);
+      });
+      net.on('creeperDeath', d => {
+        this.creepers.delete(d.id);
+        if (this._tags) { const tag = this._tags.get(d.id); if (tag) { tag.node.remove(); this._tags.delete(d.id); } }
+      });
       net.on('shopState', st => { this.shop = st; this._renderShop(); });
       net.on('disconnected', reason => {
         // This only ever fires for an unexpected drop (a deliberate leave-
@@ -1105,7 +1117,7 @@
         const r = this._ensureRemote({ id, name: id, x, y, z, yaw, pitch, health, alive, slot, bot: String(id).startsWith('bot') || isDummy, dummy: isDummy });
         r.tx = x; r.ty = y; r.tz = z; r.tyaw = yaw; r.tpitch = pitch;
         r.health = health; r.alive = !!alive; r.slot = slot; r.absorption = absorption || 0;
-        r.sneak = !!(flags & 1); r.sprint = !!(flags & 2); r.blocking = !!(flags & 4); r.burning = !!(flags & 8); r.hasEffect = !!(flags & 16); r.gliding = !!(flags & 32);
+        r.sneak = !!(flags & 1); r.sprint = !!(flags & 2); r.blocking = !!(flags & 4); r.burning = !!(flags & 8); r.hasEffect = !!(flags & 16); r.gliding = !!(flags & 32); r.invisible = !!(flags & 64);
         r.vx = vx; r.vz = vz;
         r.snapT = now;
       }
@@ -1126,6 +1138,14 @@
       // teleport) arrive as their own one-off events instead, handled in
       // _wireNetEvents. No interpolation smoothing yet, just direct
       // position updates - acceptable at a wolf's walking pace.
+      if (s.c) {
+        for (const row of s.c) {
+          const [id, x, y, z, yaw, fuse] = row;
+          const c = this.creepers.get(id);
+          if (!c) continue;
+          c.x = x; c.y = y; c.z = z; c.yaw = yaw; c.fuse = fuse;
+        }
+      }
       if (s.w) {
         for (const row of s.w) {
           const [id, x, y, z, yaw] = row;
@@ -1763,9 +1783,9 @@
         // decremented server-side (it also owns the cooldown), mirrored
         // back here on the 'ammo' event like every other consumable.
         const t = performance.now();
-        if (this.ammo.wolf_spawn_egg <= 0 || t - (this._lastWolfEggAt || 0) < item.cooldown * 1000) return;
-        this._lastWolfEggAt = t;
-        this.net.spawnWolf();
+        if ((this.ammo[item.key] || 0) <= 0 || t - (this._lastSpawnEggAt || 0) < item.cooldown * 1000) return;
+        this._lastSpawnEggAt = t;
+        this.net.spawnMob();
         this._swingLocal();
         global.MCSound.click();
       }
@@ -2854,6 +2874,12 @@
         if (!p.skin) p.skin = r.getSkin(p.name);
         const heldItem = ITEMS[p.slot || 0];
         const pose = poseFor(p.walkPhase || 0, p.swingT, heldItem, p.blocking);
+        // Invisibility: body, armor and held item are all skipped - the
+        // held item hangs off the arm bone drawPlayer() stashes, so drawing
+        // it without the body would pin it to whoever was drawn last.
+        // The nametag deliberately still shows, same as vanilla, so an
+        // invisible player can still be picked out at close range.
+        if (p.invisible) { this._drawNameTag(p); continue; }
         r.drawPlayer(p.skin, p.x, p.y, p.z, p.yaw, pose, [1, 1, 1], 1);
         // Real inflated armor geometry worn over the body (see
         // MCEntities.armorParts), not a tint on the skin - drawn as a
@@ -2877,6 +2903,19 @@
         }
         r.drawWolf(w.x, w.y, w.z, w.yaw, w.hasArmor, wolfPose(w.walkPhase || 0, w.idlePhase || 0, w.gait || 0));
         this._drawNameTag(w);
+      }
+      // creepers - same fog skip, and the fuse drives a swell/flash so you
+      // get the same "back away now" tell as vanilla.
+      for (const c of this.creepers.values()) {
+        if (Math.hypot(c.x - eye[0], c.y - eye[1], c.z - eye[2]) > fogFar) {
+          const tag = this._tags && this._tags.get(c.id);
+          if (tag) tag.node.style.display = 'none';
+          continue;
+        }
+        const fuseTime = c.charged ? C.CREEPER_CHARGED_FUSE_SECONDS : C.CREEPER_FUSE_SECONDS;
+        const flash = clamp((c.fuse || 0) / fuseTime, 0, 1);
+        r.drawCreeper(c.x, c.y, c.z, c.yaw, c.charged, flash);
+        this._drawNameTag(c);
       }
       if (this._damageNumbers && this._damageNumbers.length) this._drawDamageNumbers();
 
@@ -3167,7 +3206,7 @@
     if (item.type === 'block' && item.ammo !== undefined) return item.name + ': ' + ammo[item.key];
     if (item.type === 'totem') return 'Totems: ' + ammo.totem;
     if (item.type === 'firework') return 'Fireworks: ' + ammo.firework;
-    if (item.type === 'spawn_egg') return 'Wolf Spawn Eggs: ' + ammo.wolf_spawn_egg;
+    if (item.type === 'spawn_egg') return item.name + 's: ' + (ammo[item.key] || 0);
     return '';
   }
 

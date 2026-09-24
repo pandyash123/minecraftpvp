@@ -145,6 +145,25 @@
     };
   }
 
+  /**
+   * Creeper: a tall boxy torso on four stubby legs, no arms - the
+   * silhouette is the whole point, so it reads as a creeper at a glance
+   * even before the texture loads.
+   */
+  function creeperParts() {
+    const P = TX.SKIN_PARTS;
+    const LEG_H = 6;
+    const body = [0, LEG_H * S, 0];
+    return {
+      body: { geo: box(8, 12, 4, -4, 0, -2, P.body), pivot: body },
+      head: { geo: box(8, 8, 8, -4, 12, -4, P.head), pivot: body },
+      legFR: { geo: box(4, LEG_H, 4, -2, -LEG_H, -2, P.legR), pivot: [-2 * S, LEG_H * S, -2 * S] },
+      legFL: { geo: box(4, LEG_H, 4, -2, -LEG_H, -2, P.legL), pivot: [2 * S, LEG_H * S, -2 * S] },
+      legBR: { geo: box(4, LEG_H, 4, -2, -LEG_H, -2, P.legR), pivot: [-2 * S, LEG_H * S, 2 * S] },
+      legBL: { geo: box(4, LEG_H, 4, -2, -LEG_H, -2, P.legL), pivot: [2 * S, LEG_H * S, 2 * S] }
+    };
+  }
+
   /** Simple textured quad in the XY plane, centred on the origin. */
   function quadGeo(w, h) {
     const x = w / 2, y = h / 2;
@@ -248,5 +267,5 @@
     return { vertices: new Float32Array(verts), count: verts.length / 3 };
   }
 
-  global.MCEntities = { playerParts, armorParts, wolfParts, quadGeo, arrowGeo, blockCubeGeo, cubeWireGeo, chargeGeo, box, S };
+  global.MCEntities = { playerParts, armorParts, wolfParts, creeperParts, quadGeo, arrowGeo, blockCubeGeo, cubeWireGeo, chargeGeo, box, S };
 })(window);

@@ -199,6 +199,8 @@ const anchorCharges = new Map();
 // vanilla), and when their owner disconnects (see the 'disconnect' handler).
 const wolves = new Map();
 let nextWolfId = 1;
+const creepers = new Map();
+let nextCreeperId = 1;
 
 const BOT_NAMES = ['Steve', 'Alex', 'Herobrine', 'Notch', 'Zombie_Slayer', 'CreeperFan',
   'DiamondSword', 'Enderman', 'PvP_God', 'BlockBuster', 'xX_Miner_Xx', 'RedstoneRick'];
@@ -260,7 +262,8 @@ function freshAmmo() {
     water_bucket: ITEM_BY_KEY.water_bucket.ammo, lava_bucket: ITEM_BY_KEY.lava_bucket.ammo,
     tnt: ITEM_BY_KEY.tnt.ammo, tnt_minecart: ITEM_BY_KEY.tnt_minecart.ammo,
     powder_snow_bucket: ITEM_BY_KEY.powder_snow_bucket.ammo, totem: ITEM_BY_KEY.totem.ammo, firework: ITEM_BY_KEY.firework.ammo,
-    wolf_spawn_egg: ITEM_BY_KEY.wolf_spawn_egg.ammo
+    wolf_spawn_egg: ITEM_BY_KEY.wolf_spawn_egg.ammo, creeper_spawn_egg: ITEM_BY_KEY.creeper_spawn_egg.ammo,
+    pot_invis: ITEM_BY_KEY.pot_invis.ammo
   };
 }
 
@@ -558,17 +561,36 @@ function hasAnyEffect(p, t) {
  * Resistance aren't mutually exclusive with each other, but a fresh Speed
  * clears any lingering Slowness and vice versa (Turtle Master's own kit) -
  * drinking one is meant to replace the other, not stack against it. */
+/**
+ * Grants a timed effect, but never downgrades one already running: a weaker
+ * dose is ignored outright rather than replacing a stronger one that's
+ * still ticking. An equal-strength dose is allowed through, which is what
+ * makes re-drinking to top the timer back up work.
+ */
+function giveEffect(p, kind, level, seconds, t) {
+  const cur = activeEffect(p, kind, t);
+  if (cur && cur.level > level) return false;
+  p.effects[kind] = { level: level, until: t + seconds };
+  return true;
+}
+
 function applyPotionEffect(p, item, t) {
   const dur = C.POTION_DURATION;
   switch (item.potion) {
-    case 'strength': p.effects.strength = { level: item.level, until: t + dur }; break;
-    case 'speed': p.effects.speed = { level: item.level, until: t + dur }; delete p.effects.slowness; break;
-    case 'fireResistance': p.effects.fireResistance = { level: 1, until: t + dur }; break;
+    case 'strength': giveEffect(p, 'strength', item.level, dur, t); break;
+    case 'speed':
+      if (giveEffect(p, 'speed', item.level, dur, t)) delete p.effects.slowness;
+      break;
+    case 'fireResistance': giveEffect(p, 'fireResistance', 1, dur, t); break;
+    case 'invisibility': giveEffect(p, 'invisibility', 1, C.INVISIBILITY_DURATION, t); break;
     case 'turtleMaster': {
       const tDur = C.TURTLE_MASTER_DURATION;
-      p.effects.slowness = { level: item.slowLevel, until: t + tDur };
-      p.effects.resistance = { level: item.resistLevel, until: t + tDur };
-      delete p.effects.speed;
+      // Both halves land together or not at all - taking the Resistance
+      // without the Slowness would be a straight upgrade over the potion.
+      if (giveEffect(p, 'resistance', item.resistLevel, tDur, t)) {
+        p.effects.slowness = { level: item.slowLevel, until: t + tDur };
+        delete p.effects.speed;
+      }
       break;
     }
     case 'instantHealth':
@@ -808,6 +830,14 @@ function kill(victim, source, cause) {
   victim.streak = 0;
   victim.respawnAt = now() + (victim.dummy ? 1 : C.RESPAWN_TIME);
   victim.vx = victim.vy = victim.vz = 0;
+  // `source` isn't always a player: a wolf is passed as its own attacker so
+  // shield/FOV checks work, and it has no ammo, coins or scoreline of its
+  // own to reward - reaching the restock below with one used to throw and
+  // take the server down with it. A pet's kill is credited to its owner,
+  // the way vanilla does; anything else ownerless counts as environmental.
+  if (source && !players.has(source.id)) {
+    source = source.ownerId ? (players.get(source.ownerId) || null) : null;
+  }
   if (source && source.id !== victim.id) {
     source.kills++;
     source.streak++;
@@ -1179,6 +1209,12 @@ function strikeLightning(x, y, z, ownerId, dealDamage) {
       const fx = bx + (rand(-1, 2) | 0), fz = bz + (rand(-1, 2) | 0), fy2 = Math.floor(y) - 1;
       if (inBounds(fx, fy2, fz) && MC.SOLID[getBlock(fx, fy2, fz)]) lightGroundFire(fx, fy2, fz);
     }
+  }
+  // Any strike near a creeper supercharges it, harmless cosmetic ones
+  // included - a bolt is a bolt, whether the storm rolled it, a Channeling
+  // trident called it down, or it marked where someone died.
+  for (const c of creepers.values()) {
+    if (Math.hypot(c.x - x, c.y - y, c.z - z) <= C.LIGHTNING_STRIKE_RADIUS) chargeCreeper(c);
   }
   io.emit('effect', { kind: 'lightning', x, y, z });
 }
@@ -1652,6 +1688,132 @@ function stepWolf(wolf, dt, t) {
   Physics.step(getBlock, wolf, input, dt);
 }
 
+// ------------------------------------------------------------- creepers ---
+// Same shape as the wolf code above: its own map, stepped from tick(), and
+// broadcast by position in the snapshot with one-off events for state
+// changes. Unlike a wolf, a creeper never belongs to a side - it hunts the
+// nearest player who isn't the one who spawned it, and is just as happy to
+// take its owner with it if they're standing in the blast.
+function spawnCreeper(owner) {
+  const dir = ownerLookDir(owner);
+  const id = 'creeper' + (nextCreeperId++);
+  const creeper = {
+    id, ownerId: owner.id, name: 'Creeper',
+    x: owner.x + dir[0] * 2.5, y: owner.y, z: owner.z + dir[2] * 2.5,
+    vx: 0, vy: 0, vz: 0, yaw: owner.yaw, pitch: 0, onGround: true,
+    health: C.CREEPER_HEALTH, maxHealth: C.CREEPER_HEALTH,
+    alive: true, charged: false,
+    targetId: null, fuse: 0
+  };
+  creepers.set(id, creeper);
+  io.emit('creeperSpawn', publicCreeper(creeper));
+  return creeper;
+}
+
+function publicCreeper(c) {
+  return {
+    id: c.id, ownerId: c.ownerId, name: c.name, x: c.x, y: c.y, z: c.z, yaw: c.yaw,
+    health: c.health, maxHealth: c.maxHealth, alive: c.alive, charged: c.charged, fuse: c.fuse
+  };
+}
+
+/** A lightning hit supercharges a creeper instead of hurting it: a far
+ *  bigger blast on a much shorter fuse, paid for with almost no health. */
+function chargeCreeper(c) {
+  if (c.charged) return;
+  c.charged = true;
+  c.maxHealth = C.CREEPER_CHARGED_HEALTH;
+  c.health = Math.min(c.health, C.CREEPER_CHARGED_HEALTH);
+  io.emit('creeperState', publicCreeper(c));
+}
+
+function damageCreeper(creeper, amount, source) {
+  if (!creeper.alive || amount <= 0) return;
+  creeper.health = Math.max(0, creeper.health - amount);
+  io.emit('creeperState', publicCreeper(creeper));
+  if (creeper.health <= 0) removeCreeper(creeper, false);
+}
+
+/** Takes a creeper off the field, optionally detonating it on the way out. */
+function removeCreeper(creeper, detonate) {
+  if (!creeper.alive) return;
+  creeper.alive = false;
+  creepers.delete(creeper.id);
+  io.emit('creeperDeath', { id: creeper.id, detonated: !!detonate });
+  if (detonate) explodeCreeper(creeper);
+}
+
+function explodeCreeper(c) {
+  const owner = players.get(c.ownerId) || null;
+  const mult = c.charged ? C.CREEPER_CHARGED_DMG_MULT : 1;
+  const radius = C.CREEPER_BLAST_RADIUS * (c.charged ? 1.5 : 1);
+  const dmg = C.CREEPER_BLAST_DMG * mult;
+  for (const p of players.values()) {
+    if (!p.alive) continue;
+    const dx = p.x - c.x, dz = p.z - c.z, dy = (p.y + 0.9) - (c.y + 0.6);
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist > radius) continue;
+    const falloff = 1 - dist / radius;
+    const l = Math.hypot(dx, dz) || 1;
+    applyDamage(p, Math.round(dmg * falloff), owner, 'creeper',
+      (dx / l) * falloff * C.CREEPER_BLAST_KB, (dz / l) * falloff * C.CREEPER_BLAST_KB, 0.5 + falloff);
+  }
+  // Wolves standing in it take the hit too, so a creeper isn't a hard
+  // counter to nothing.
+  for (const w of [...wolves.values()]) {
+    const dist = Math.hypot(w.x - c.x, w.y - c.y, w.z - c.z);
+    if (dist <= radius) damageWolf(w, dmg * (1 - dist / radius), null);
+  }
+  blastBlocks(c.x, c.y + 0.5, c.z, radius, c.ownerId);
+  io.emit('effect', { kind: 'explosion', x: c.x, y: c.y + 0.5, z: c.z, radius });
+}
+
+function stepCreeper(c, dt, t) {
+  // Hunt the nearest player who isn't the one who spawned it.
+  let target = c.targetId ? players.get(c.targetId) : null;
+  if (!target || !target.alive || Math.hypot(target.x - c.x, target.z - c.z) > C.CREEPER_HUNT_RANGE) {
+    target = null;
+    let best = C.CREEPER_HUNT_RANGE;
+    for (const p of players.values()) {
+      if (!p.alive || p.id === c.ownerId || p.dummy) continue;
+      const d = Math.hypot(p.x - c.x, p.z - c.z);
+      if (d < best) { best = d; target = p; }
+    }
+    c.targetId = target ? target.id : null;
+  }
+
+  const input = { forward: 0, strafe: 0, jump: false, sneak: false, sprint: false, yaw: c.yaw };
+  if (target) {
+    const dx = target.x - c.x, dz = target.z - c.z;
+    const dist = Math.hypot(dx, dz);
+    const wantYaw = Math.atan2(-dx, -dz);
+    let diff = wantYaw - c.yaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    c.yaw += clamp(diff, -5 * dt, 5 * dt);
+
+    const fuseTime = c.charged ? C.CREEPER_CHARGED_FUSE_SECONDS : C.CREEPER_FUSE_SECONDS;
+    if (dist <= C.CREEPER_FUSE_RANGE) {
+      // Close enough: stop and start counting down.
+      c.fuse += dt;
+      if (c.fuse >= fuseTime) { removeCreeper(c, true); return; }
+    } else if (c.fuse > 0 && dist > C.CREEPER_ESCAPE_RANGE) {
+      // Backing off far enough defuses it, same as vanilla - running is a
+      // real answer to a creeper rather than just delaying it.
+      c.fuse = 0;
+      io.emit('creeperState', publicCreeper(c));
+    } else {
+      input.forward = 1;
+      input.sprint = true;
+    }
+  } else if (c.fuse > 0) {
+    c.fuse = 0;
+  }
+
+  input.yaw = c.yaw;
+  Physics.step(getBlock, c, input, dt);
+}
+
 function stepBot(bot, dt, t) {
   if (!bot.alive) return;
   if (bot.dummy && !bot.attackDummy) return; // a training dummy never moves or fights back
@@ -1956,10 +2118,21 @@ function tick() {
   // Rare cosmetic strikes during a thunderstorm, just for atmosphere - near
   // a random living player so it's actually visible to someone, no damage.
   if (weather === 'thunder' && Math.random() < C.RANDOM_LIGHTNING_CHANCE_PER_TICK) {
-    const alive = [...players.values()].filter(p => p.alive);
-    if (alive.length) {
-      const p = pick(alive);
-      strikeLightning(p.x + rand(-6, 6), p.y + 1, p.z + rand(-6, 6), null, true);
+    // Creepers pull strikes onto themselves in a storm - roughly one in
+    // three goes to a creeper rather than a player, which is what makes
+    // fighting near them in the rain genuinely dangerous. That strike is a
+    // real one: it supercharges whatever it lands on.
+    const exposed = [...creepers.values()];
+    if (exposed.length && Math.random() < C.CREEPER_LIGHTNING_SHARE) {
+      const c = pick(exposed);
+      strikeLightning(c.x, c.y + 1, c.z, null, true);
+      chargeCreeper(c);
+    } else {
+      const alive = [...players.values()].filter(p => p.alive);
+      if (alive.length) {
+        const p = pick(alive);
+        strikeLightning(p.x + rand(-6, 6), p.y + 1, p.z + rand(-6, 6), null, true);
+      }
     }
   }
 
@@ -2063,6 +2236,7 @@ function tick() {
   // (players.delete already happened by the time this runs, so it just
   // shows up as a missing owner here, no separate cleanup needed elsewhere).
   for (const w of wolves.values()) stepWolf(w, dt, t);
+  for (const c of [...creepers.values()]) stepCreeper(c, dt, t);
 
   // TNT / TNT Minecart fuses - explode anything whose timer has run out.
   stepChain(t);
@@ -2142,7 +2316,7 @@ function sendSnapshot() {
       // it a player eating gapples reads as an empty health bar that refuses
       // to die, because the hearts soaking the damage are invisible.
       Math.round(p.absorption * 10) / 10,
-      (p.sneak ? 1 : 0) | (p.sprint ? 2 : 0) | (p.blocking ? 4 : 0) | (p.burnUntil > t ? 8 : 0) | (hasAnyEffect(p, t) ? 16 : 0) | (p.gliding ? 32 : 0),
+      (p.sneak ? 1 : 0) | (p.sprint ? 2 : 0) | (p.blocking ? 4 : 0) | (p.burnUntil > t ? 8 : 0) | (hasAnyEffect(p, t) ? 16 : 0) | (p.gliding ? 32 : 0) | (activeEffect(p, 'invisibility', t) ? 64 : 0),
       Math.round(p.vx * 10) / 10, Math.round(p.vz * 10) / 10
     ]);
   }
@@ -2156,7 +2330,12 @@ function sendSnapshot() {
   for (const w of wolves.values()) {
     wlv.push([w.id, Math.round(w.x * 100) / 100, Math.round(w.y * 100) / 100, Math.round(w.z * 100) / 100, Math.round(w.yaw * 1000) / 1000]);
   }
-  io.volatile.emit('snapshot', { t: Date.now(), p: list, r: prj, w: wlv });
+  const crp = [];
+  for (const c of creepers.values()) {
+    crp.push([c.id, Math.round(c.x * 100) / 100, Math.round(c.y * 100) / 100, Math.round(c.z * 100) / 100,
+      Math.round(c.yaw * 1000) / 1000, Math.round(c.fuse * 100) / 100]);
+  }
+  io.volatile.emit('snapshot', { t: Date.now(), p: list, r: prj, w: wlv, c: crp });
 }
 
 // ---------------------------------------------------------------- server ---
@@ -2221,6 +2400,7 @@ io.on('connection', socket => {
       // never creates an entry for them and the snapshot's position rows
       // have nothing to update - the wolves stay invisible for that client.
       wolves: [...wolves.values()].map(publicWolf),
+      creepers: [...creepers.values()].map(publicCreeper),
       you: publicPlayer(me),
       ammo: me.ammo,
       shop: shopState(me),
@@ -2300,6 +2480,7 @@ io.on('connection', socket => {
     // Wolves live in their own map (see damageWolf) rather than `players`,
     // so a swing checks both - same reach rules either way.
     const wolfHits = [];
+    const creeperHits = [];
     for (const id of rawIds) {
       const victim = players.get(id);
       if (victim && victim.alive && victim.id !== me.id) {
@@ -2311,12 +2492,18 @@ io.on('connection', socket => {
       if (w && w.alive) {
         const dist = Math.hypot(w.x - me.x, (w.y + 0.5) - (me.y + MC.PHYS.EYE), w.z - me.z);
         if (dist <= reach && dist >= minReach) wolfHits.push(w);
+        continue;
+      }
+      const cr = creepers.get(id);
+      if (cr && cr.alive) {
+        const dist = Math.hypot(cr.x - me.x, (cr.y + 0.6) - (me.y + MC.PHYS.EYE), cr.z - me.z);
+        if (dist <= reach && dist >= minReach) creeperHits.push(cr);
       }
     }
     // Every other weapon needs an actual target to do anything; the spear's
     // Lunge fires on every swing regardless (a mobility tool as much as a
     // weapon), so only bail out here for a non-spear whiff.
-    if (!hits.length && !wolfHits.length && !isSpear) return;
+    if (!hits.length && !wolfHits.length && !creeperHits.length && !isSpear) return;
     me.lastAttack = t;
 
     let dmg = item.damage || 1;
@@ -2378,7 +2565,8 @@ io.on('connection', socket => {
       if (fireAspect) ignitePlayer(victim, t);
     }
     for (const w of wolfHits) damageWolf(w, dmg, me);
-    const firstHit = hits[0] || wolfHits[0];
+    for (const cr of creeperHits) damageCreeper(cr, dmg, me);
+    const firstHit = hits[0] || wolfHits[0] || creeperHits[0];
     if (crit && firstHit) io.emit('effect', { kind: 'crit', x: firstHit.x, y: firstHit.y + 1, z: firstHit.z });
     if (smash) {
       io.emit('effect', { kind: 'smash', x: firstHit.x, y: firstHit.y + 0.2, z: firstHit.z });
@@ -2405,17 +2593,20 @@ io.on('connection', socket => {
   // Right-click a Wolf Spawn Egg to spawn a wolf loyal only to you (see
   // spawnWolf/stepWolf) - no aiming needed, it appears a couple blocks in
   // front of wherever you're facing.
-  socket.on('spawnWolf', () => {
+  // One handler for every spawn egg - which creature appears comes from
+  // the held item's own `mob` field (see the spawn_egg ITEMS entries).
+  socket.on('spawnMob', () => {
     if (!me || !me.alive) return;
     const item = itemForPlayer(me, me.slot);
     if (!item || item.type !== 'spawn_egg') return;
     const t = now();
-    if (t - (me.lastWolfEgg || 0) < item.cooldown) return;
-    if ((me.ammo.wolf_spawn_egg || 0) <= 0) return;
-    me.lastWolfEgg = t;
-    me.ammo.wolf_spawn_egg--;
+    if (t - (me.lastSpawnEgg || 0) < item.cooldown) return;
+    if ((me.ammo[item.key] || 0) <= 0) return;
+    me.lastSpawnEgg = t;
+    me.ammo[item.key]--;
     socket.emit('ammo', me.ammo);
-    spawnWolf(me, me.dogArmor);
+    if (item.mob === 'creeper') spawnCreeper(me);
+    else spawnWolf(me, me.dogArmor);
   });
 
   // Shop purchases are decided entirely here: the client sends only which
@@ -2560,10 +2751,12 @@ io.on('connection', socket => {
     me.ammo[item.key]--;
     const t = now();
     me.health = Math.min(C.MAX_HEALTH, me.health + item.heal);
-    me.absorption = Math.min(item.absorbCap || 8, me.absorption + item.absorb);
-    if (item.regenLevel) me.effects.regeneration = { level: item.regenLevel, until: t + item.regenSeconds };
-    if (item.fireResLevel) me.effects.fireResistance = { level: item.fireResLevel, until: t + item.buffSeconds };
-    if (item.resistLevel) me.effects.resistance = { level: item.resistLevel, until: t + item.buffSeconds };
+    // Never reduces an existing shield - a gapple after an egap tops up
+    // toward its own cap instead of clipping you back down to it.
+    me.absorption = Math.max(me.absorption, Math.min(item.absorbCap || 8, me.absorption + item.absorb));
+    if (item.regenLevel) giveEffect(me, 'regeneration', item.regenLevel, item.regenSeconds, t);
+    if (item.fireResLevel) giveEffect(me, 'fireResistance', item.fireResLevel, item.buffSeconds, t);
+    if (item.resistLevel) giveEffect(me, 'resistance', item.resistLevel, item.buffSeconds, t);
     if (item.regenLevel || item.fireResLevel || item.resistLevel) socket.emit('effects', effectsSnapshot(me, t));
     socket.emit('heal', { health: me.health, absorption: me.absorption, ammo: me.ammo });
     io.emit('hp', { id: me.id, health: me.health, absorption: me.absorption });

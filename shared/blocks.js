@@ -198,7 +198,13 @@
     // follows you around, never attacks you, and fights back for you if you
     // or it gets hit. Dog Armor (see the menu's "Give wolves armor"
     // checkbox) is decided per-owner at join, not per-egg.
-    { key: 'wolf_spawn_egg', name: 'Wolf Spawn Egg', type: 'spawn_egg', ammo: 4, cooldown: 1.0, mineSpeed: 0.3 },
+    // Spawn eggs all share one code path - `mob` is what actually gets
+    // summoned, so a new creature is an entry here plus a spawn function.
+    { key: 'wolf_spawn_egg', name: 'Wolf Spawn Egg', type: 'spawn_egg', mob: 'wolf', ammo: 4, cooldown: 1.0, mineSpeed: 0.3 },
+    // Creepers hunt whoever isn't their owner, charge up, and go off. A
+    // lightning strike turns one into a charged creeper: far bigger blast,
+    // much shorter fuse, and almost no health to stop it with.
+    { key: 'creeper_spawn_egg', name: 'Creeper Spawn Egg', type: 'spawn_egg', mob: 'creeper', ammo: 3, cooldown: 1.4, mineSpeed: 0.3 },
     // Absorption is instant on eating; the 4 hearts of real healing trickle
     // in afterward via Regeneration I (8 HP over 8s = 1 HP/s), not a flat
     // instant heal.
@@ -247,6 +253,9 @@
     // place, not to move or deal damage.
     { key: 'pot_turtle', name: 'Turtle Master Potion (Slowness VI, Resistance IV)', type: 'potion', potion: 'turtleMaster', slowLevel: 6, resistLevel: 4, ammo: 8, cooldown: 0.5 },
     { key: 'pot_health', name: 'Potion of Instant Health II', type: 'potion', potion: 'instantHealth', heal: 10, ammo: 8, cooldown: 0.5 },
+    // Invisibility hides the wearer's body from everyone else (their held
+    // item and nametag still give them away up close, same as vanilla).
+    { key: 'pot_invis', name: 'Potion of Invisibility (8 min)', type: 'potion', potion: 'invisibility', ammo: 4, cooldown: 0.5 },
     // Quick Charge + Multishot are baked in (not toggles), same precedent as
     // the mace/spear above: a much shorter draw than the bow, and every
     // shot fires 3 arrows in a spread from a single arrow of ammo.
@@ -341,11 +350,11 @@
     web: {
       key: 'web', name: 'Web PvP',
       items: ['sword', 'bow', 'pearl', 'gapple', 'pick', 'cobble', 'planks', 'cobweb', 'axe', 'mace', 'spear', 'windcharge',
-        'obsidian', 'pot_strength', 'pot_speed', 'pot_fireres', 'pot_turtle', 'pot_health',
+        'obsidian', 'pot_strength', 'pot_speed', 'pot_fireres', 'pot_turtle', 'pot_health', 'pot_invis',
         'crossbow', 'trident', 'stick', 'egap',
         'water_bucket', 'lava_bucket', 'tnt', 'tnt_minecart', 'rail', 'flint_steel',
         'powder_snow_bucket', 'totem', 'firework',
-        'end_crystal', 'respawn_anchor', 'glowstone', 'wolf_spawn_egg']
+        'end_crystal', 'respawn_anchor', 'glowstone', 'wolf_spawn_egg', 'creeper_spawn_egg']
       // netherite_sword/netherite_axe are deliberately NOT listed here -
       // they're a tier swap on top of sword/axe (see swordTier/axeTier,
       // set at join), not separate items you'd pick alongside them. Only
@@ -640,6 +649,24 @@
     // Explosives caught in a blast go off a beat later rather than
     // instantly, so a chain reaction visibly spreads outward.
     CHAIN_DELAY_SECONDS: 0.35,
+
+    // ----------------------------------------------------------- creepers --
+    CREEPER_HEALTH: 14,
+    CREEPER_CHARGED_HEALTH: 4,      // glass cannon - kill it before it reaches you
+    CREEPER_SPEED: 4.2,
+    CREEPER_FUSE_RANGE: 3.2,        // starts charging inside this
+    CREEPER_ESCAPE_RANGE: 5.0,      // ...and gives up if you get back outside it
+    CREEPER_FUSE_SECONDS: 1.6,
+    CREEPER_CHARGED_FUSE_SECONDS: 0.7,
+    CREEPER_BLAST_RADIUS: 4.5,
+    CREEPER_BLAST_DMG: 11,
+    CREEPER_CHARGED_DMG_MULT: 5,
+    CREEPER_BLAST_KB: 1.5,
+    CREEPER_HUNT_RANGE: 34,
+    // Rain/thunder: a creeper standing out in it pulls strikes onto itself.
+    // Roughly one in three random strikes goes to a creeper instead of a
+    // player, which is what turns a storm into a real hazard.
+    CREEPER_LIGHTNING_SHARE: 0.34,
     REGEN_DELAY: 5.0,
     REGEN_INTERVAL: 2.5,
     SPAWN_PROTECT: 2.5,
@@ -718,8 +745,13 @@
     // Master is deliberately much shorter (it's a defensive panic button,
     // not a sustained buff) - see TURTLE_MASTER_DURATION. Instant Health is
     // immediate and has no duration.
-    POTION_DURATION: 480,
-    TURTLE_MASTER_DURATION: 30,
+    // Thrown potions are a burst of advantage in a fight, not something you
+    // drink once and carry for the rest of the match.
+    POTION_DURATION: 45,
+    TURTLE_MASTER_DURATION: 20,
+    // Invisibility is the exception - it's meant to last, so it stays on
+    // its own long timer rather than the short combat one above.
+    INVISIBILITY_DURATION: 480,
     // Every potion your kit/loadout grants restocks by this many per kill,
     // same "keep the fight going" reward as the arrow/pearl/apple/wind
     // charge restock below.
@@ -743,9 +775,9 @@
 
     // Enchant toggles (see ENCHANT_DEFS above).
     SHARPNESS_DMG_BONUS: 3, // sword/axe, same scale as Strength's own bonus
-    KNOCKBACK_ENCHANT_ADD: 1.1, // sword Knockback III, added to the hit's knockback multiplier
+    KNOCKBACK_ENCHANT_ADD: 2.2, // sword Knockback III, added to the hit's knockback multiplier
     POWER_DMG_BONUS: 4, // bow Power V, added to arrow damage at any draw
-    PUNCH_ENCHANT_ADD: 1.3, // bow Punch III, added to the arrow's knockback multiplier
+    PUNCH_ENCHANT_ADD: 2.6, // bow Punch III, added to the arrow's knockback multiplier
     // Bow boosting: shoot a low-charge arrow point-blank and step/jump into
     // its path once the 0.12s self-hit grace period passes (see
     // stepProjectiles) - a deliberate mobility trick, so a self-hit gets a
@@ -786,8 +818,8 @@
 
     // Stick: Knockback II/V dwarf a normal weapon's kbMul (usually ~1-1.8) -
     // added on top of it, not replacing it.
-    STICK_KB2_ADD: 4.5,
-    STICK_KB5_ADD: 12,
+    STICK_KB2_ADD: 7,
+    STICK_KB5_ADD: 18,
 
     // Pickaxe Efficiency V: multiplies mineSpeed - purely a client-side
     // pacing number (mining has no server-side timing check), same as every

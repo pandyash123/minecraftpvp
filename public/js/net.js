@@ -34,6 +34,7 @@
           'killreward', 'hp', 'death', 'block', 'snapshot', 'projectile', 'projectileGone', 'swing',
           'hitmarker', 'arrowHit', 'effect', 'scores', 'chat', 'ammo', 'shieldStun', 'launch',
           'effects', 'weather', 'elytraUnlocked', 'wolfSpawn', 'wolfHp', 'wolfDeath', 'wolfTeleport', 'shopState',
+          'creeperSpawn', 'creeperState', 'creeperDeath',
           // worldReset was missing here, so game.js's listener for it never
           // fired and an in-game terrain reset (or arena change) left
           // everyone still rendering the old map.
@@ -81,7 +82,7 @@
     hitCrystal(x, y, z) { if (this.socket) this.socket.emit('hitCrystal', { x, y, z }); }
     chargeAnchor(x, y, z) { if (this.socket) this.socket.emit('chargeAnchor', { x, y, z }); }
     hitAnchor(x, y, z) { if (this.socket) this.socket.emit('hitAnchor', { x, y, z }); }
-    spawnWolf() { if (this.socket) this.socket.emit('spawnWolf'); }
+    spawnMob() { if (this.socket) this.socket.emit('spawnMob'); }
     chat(text) { if (this.socket) this.socket.emit('chat', text); }
     shopBuy(key) { if (this.socket) this.socket.emit('shopBuy', key); }
   }

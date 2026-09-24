@@ -219,6 +219,10 @@
       this.armorVAOs = {};
       for (const k in this.armorParts) this.armorVAOs[k] = entityVAO(gl, this.armorParts[k].geo);
       this.armorTex = new Map();
+      this.creeperParts = ME.creeperParts();
+      this.creeperVAOs = {};
+      for (const k in this.creeperParts) this.creeperVAOs[k] = entityVAO(gl, this.creeperParts[k].geo);
+      this.creeperTex = {};
       this.wolfParts = ME.wolfParts();
       this.wolfVAOs = {};
       for (const k in this.wolfParts) this.wolfVAOs[k] = entityVAO(gl, this.wolfParts[k].geo);
@@ -284,6 +288,12 @@
       const k = tier + ':' + pieceKey;
       if (!byPiece[k]) byPiece[k] = global.MCTextures.createArmorTexture(this.gl, tier, pieceKey, faceGrids);
       return byPiece[k];
+    }
+
+    getCreeperTexture(charged) {
+      const k = charged ? 'charged' : 'plain';
+      if (!this.creeperTex[k]) this.creeperTex[k] = global.MCTextures.createCreeperTexture(this.gl, charged);
+      return this.creeperTex[k];
     }
 
     getWolfTexture(armored) {
@@ -531,6 +541,42 @@
      * pose) - a moving wolf still reads fine since the whole body glides
      * forward, it just doesn't have a walk cycle.
      */
+    /**
+     * Creeper. `flash` (0..1) is how far into its fuse it is - the model
+     * swells and washes out toward white as it charges, which is the only
+     * warning you get before it goes off.
+     */
+    drawCreeper(x, y, z, yaw, charged, flash) {
+      const gl = this.gl;
+      gl.useProgram(this.progEntity);
+      gl.uniformMatrix4fv(this.progEntity.u.uVP, false, this.viewProj);
+      const f = flash || 0;
+      gl.uniform3fv(this.progEntity.u.uTint, [1 + f * 1.6, 1 + f * 0.9, 1 + f * 0.9]);
+      gl.uniform1f(this.progEntity.u.uAlpha, 1);
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.getCreeperTexture(charged));
+      gl.uniform1i(this.progEntity.u.uTex, 0);
+
+      const swell = 1 + f * 0.25;
+      const base = M4.create();
+      M4.fromTRS(base, x, y, z, 0, yaw, 0, swell, swell, swell);
+      const m = M4.create(), local = M4.create(), tmp = M4.create();
+      for (const key in this.creeperParts) {
+        const pivot = this.creeperParts[key].pivot;
+        M4.fromTRS(local, pivot[0], pivot[1], pivot[2], 0, 0, 0, 1, 1, 1);
+        M4.multiply(tmp, base, local);
+        m.set(tmp);
+        gl.uniformMatrix4fv(this.progEntity.u.uModel, false, m);
+        const vao = this.creeperVAOs[key];
+        gl.bindVertexArray(vao.vao);
+        gl.drawElements(gl.TRIANGLES, vao.count, gl.UNSIGNED_SHORT, 0);
+      }
+      gl.bindVertexArray(null);
+      gl.uniform3fv(this.progEntity.u.uTint, [1, 1, 1]);
+    }
+
     drawWolf(x, y, z, yaw, hasArmor, pose) {
       const gl = this.gl;
       gl.useProgram(this.progEntity);

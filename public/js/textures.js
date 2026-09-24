@@ -666,6 +666,54 @@
     return cv;
   }
 
+  /**
+   * Creeper hide: mottled green, with the classic face painted into the
+   * head's front atlas face. A charged creeper keeps the same face but
+   * takes on the electric blue-white cast that warns you it's the one
+   * that will take a chunk out of the map.
+   */
+  function paintCreeper(charged) {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const g = cv.getContext('2d');
+    g.imageSmoothingEnabled = false;
+
+    const base = charged ? '#4fd8e8' : '#5bab48';
+    const dark = charged ? '#2b7f95' : '#3d7a33';
+    const rnd = rng(hashStr(charged ? 'creeper_charged' : 'creeper') || 7);
+    const [r0, g0, b0] = hex(base);
+    const img = g.createImageData(64, 64);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const n = (rnd() - 0.5) * 34;
+      img.data[i] = clamp255(r0 + n);
+      img.data[i + 1] = clamp255(g0 + n);
+      img.data[i + 2] = clamp255(b0 + n);
+      img.data[i + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+    const blotch = rng(4242);
+    g.fillStyle = dark;
+    for (let i = 0; i < 260; i++) {
+      if (blotch() > 0.4) continue;
+      g.fillRect((blotch() * 64) | 0, (blotch() * 64) | 0, 1 + ((blotch() * 2) | 0), 1 + ((blotch() * 2) | 0));
+    }
+
+    // The face, on the head's front rect (the model looks -Z).
+    const [hu, hv, hw, hh] = SKIN_PARTS.head.front;
+    const px = hw / 8, py = hh / 8;
+    const fill = (x, y, w, h, c) => { g.fillStyle = c; g.fillRect(hu + x * px, hv + y * py, w * px, h * py); };
+    fill(1, 2, 2, 2, '#0c1410');   // eyes
+    fill(5, 2, 2, 2, '#0c1410');
+    fill(3, 4, 2, 2, '#0c1410');   // nose/mouth block
+    fill(2, 5, 1, 2, '#0c1410');   // ...and its two fangs
+    fill(5, 5, 1, 2, '#0c1410');
+    return cv;
+  }
+
+  function createCreeperTexture(gl, charged) {
+    return uploadNearest(gl, paintCreeper(charged));
+  }
+
   function createWolfTexture(gl, armored) {
     return uploadNearest(gl, paintWolf(armored));
   }
@@ -766,7 +814,8 @@
     pot_speed: ['#3fa9d6', '#bfe8ff'],
     pot_fireres: ['#e07a1a', '#ffcf7a'],
     pot_turtle: ['#3a5a2a', '#8fce6a'],
-    pot_health: ['#e0432a', '#ff9a8a']
+    pot_health: ['#e0432a', '#ff9a8a'],
+    pot_invis: ['#8f8f9c', '#d8d8e4']
   };
 
   /** Classic Minecraft-shaped potion bottle: narrow neck, rounded body, a
@@ -1165,6 +1214,19 @@
       g.fillStyle = '#7de3e0';
       g.fillRect(S * 0.46, S * 0.36, S * 0.03, S * 0.03);
       g.fillRect(S * 0.51, S * 0.36, S * 0.03, S * 0.03);
+    } else if (key === 'creeper_spawn_egg') {
+      // Same spawn-egg shape as the wolf's, in creeper green.
+      g.fillStyle = '#5bab48';
+      g.beginPath();
+      g.ellipse(S * 0.5, S * 0.56, S * 0.28, S * 0.36, 0, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = '#2f5c28';
+      const cspots = [[0.42, 0.4], [0.58, 0.46], [0.46, 0.62], [0.6, 0.68], [0.38, 0.58], [0.52, 0.32]];
+      for (const [sx, sy] of cspots) {
+        g.beginPath();
+        g.ellipse(S * sx, S * sy, S * 0.06, S * 0.05, 0.4, 0, Math.PI * 2);
+        g.fill();
+      }
     } else if (key === 'wolf_spawn_egg') {
       // Classic vanilla spawn-egg look: an egg-shaped base color (wolf fur
       // grey-brown) with a speckled pattern in a contrasting color (the
@@ -1320,7 +1382,7 @@
 
   global.MCTextures = {
     TILE, buildTiles, createBlockTexture, createSkinTexture, createLabelTexture, createArmorTexture,
-    createWolfTexture, paintWolf,
+    createWolfTexture, paintWolf, createCreeperTexture, paintCreeper,
     blockIcon, itemIcon, heartIcon, flameIcon, paintSkin, paintArmor, SKIN_PARTS, boxUV, hashStr, POTION_COLORS,
     pieceFaceRects, PIECE_PARTS, FACE_ORDER, stampTrim,
     SHIELD_ICON_SIZE: 128
