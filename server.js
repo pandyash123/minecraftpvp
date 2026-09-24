@@ -640,6 +640,9 @@ function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
     }
     const resist = activeEffect(victim, 'resistance', t);
     if (resist) dmg *= (1 - Math.min(1, C.RESISTANCE_PCT_PER_LEVEL * resist.level));
+    // Floor the combined armor/Protection/Resistance reduction before the
+    // shield is considered, so a hit that connects always does something.
+    dmg = Math.max(dmg, amount * (1 - C.MAX_DAMAGE_REDUCTION));
     const canBlock = !!source && source.id !== victim.id && shieldBlocks(victim, source, t);
     if (canBlock) {
       // The hit that breaks through still gets blocked normally - the
@@ -2044,6 +2047,10 @@ function sendSnapshot() {
       Math.round(p.x * 100) / 100, Math.round(p.y * 100) / 100, Math.round(p.z * 100) / 100,
       Math.round(p.yaw * 1000) / 1000, Math.round(p.pitch * 1000) / 1000,
       p.health, p.alive ? 1 : 0, p.slot,
+      // Absorption rides along so other clients can show the shield. Without
+      // it a player eating gapples reads as an empty health bar that refuses
+      // to die, because the hearts soaking the damage are invisible.
+      Math.round(p.absorption * 10) / 10,
       (p.sneak ? 1 : 0) | (p.sprint ? 2 : 0) | (p.blocking ? 4 : 0) | (p.burnUntil > t ? 8 : 0) | (hasAnyEffect(p, t) ? 16 : 0) | (p.gliding ? 32 : 0),
       Math.round(p.vx * 10) / 10, Math.round(p.vz * 10) / 10
     ]);
@@ -2118,6 +2125,11 @@ io.on('connection', socket => {
       spawn: { x: me.x, y: me.y, z: me.z },
       edits: editList,
       players: [...players.values()].map(publicPlayer),
+      // Wolves already on the field. wolfSpawn only reaches whoever was
+      // connected at the time, so without this a player who joins later
+      // never creates an entry for them and the snapshot's position rows
+      // have nothing to update - the wolves stay invisible for that client.
+      wolves: [...wolves.values()].map(publicWolf),
       you: publicPlayer(me),
       ammo: me.ammo,
       shop: shopState(me),

@@ -792,6 +792,8 @@
 
       this.remote.clear();
       for (const p of init.players) if (p.id !== this.me.id) this._ensureRemote(p);
+      this.wolves.clear();
+      for (const w of (init.wolves || [])) this.wolves.set(w.id, w);
       // Input/net handlers are wired to this persistent Game instance once
       // ever - re-wiring on every session would stack duplicate listeners
       // and fire everything N times after N replays.
@@ -1001,7 +1003,7 @@
       net.on('effects', d => this._applyEffectsSnapshot(d));
       net.on('hp', d => {
         if (d.id === this.me.id) { this.me.health = d.health; this.me.absorption = d.absorption; this._updateHealthUI(); }
-        else { const r = this.remote.get(d.id); if (r) r.health = d.health; }
+        else { const r = this.remote.get(d.id); if (r) { r.health = d.health; r.absorption = d.absorption || 0; } }
       });
       net.on('hitmarker', d => {
         this.hitmarkerT = 0.35;
@@ -1088,12 +1090,12 @@
     _applySnapshot(s) {
       const now = performance.now();
       for (const row of s.p) {
-        const [id, x, y, z, yaw, pitch, health, alive, slot, flags, vx, vz] = row;
+        const [id, x, y, z, yaw, pitch, health, alive, slot, absorption, flags, vx, vz] = row;
         if (id === this.me.id) { this.me.burning = !!(flags & 8); continue; }
         const isDummy = String(id).startsWith('dummy') || String(id).startsWith('atkdummy');
         const r = this._ensureRemote({ id, name: id, x, y, z, yaw, pitch, health, alive, slot, bot: String(id).startsWith('bot') || isDummy, dummy: isDummy });
         r.tx = x; r.ty = y; r.tz = z; r.tyaw = yaw; r.tpitch = pitch;
-        r.health = health; r.alive = !!alive; r.slot = slot;
+        r.health = health; r.alive = !!alive; r.slot = slot; r.absorption = absorption || 0;
         r.sneak = !!(flags & 1); r.sprint = !!(flags & 2); r.blocking = !!(flags & 4); r.burning = !!(flags & 8); r.hasEffect = !!(flags & 16); r.gliding = !!(flags & 32);
         r.vx = vx; r.vz = vz;
         r.snapT = now;
@@ -1208,7 +1210,7 @@
       document.addEventListener('mousedown', e => {
         if (!this.pointerLocked) return;
         if (e.button === 0) { this.mouseDown.left = true; this._onLeftDown(); }
-        if (e.button === 2) { this.mouseDown.right = true; this.rightDownAt = performance.now(); this._onRightDown(); }
+        if (e.button === 2) { this.mouseDown.right = true; this.rightDownAt = performance.now(); this._ateThisHold = false; this._onRightDown(); }
       });
       document.addEventListener('mouseup', e => {
         if (e.button === 0) { this.mouseDown.left = false; this._onLeftUp(); }
@@ -1799,12 +1801,10 @@
         }
         this.hud.chargeWrap.classList.add('hidden');
       } else if (item.type === 'food') {
+        // Releasing early still counts once most of the bar is filled; a
+        // full bar has already been eaten by _updateCharging.
         const held = (performance.now() - this.rightDownAt) / 1000;
-        if (held > item.eatTime * 0.7 && this.ammo[item.key] > 0) {
-          this.net.eat();
-          this.ammo[item.key]--; this._updateAmmoUI();
-          global.MCSound.eat();
-        }
+        if (held > item.eatTime * 0.7) this._finishEating(item);
         this.hud.chargeWrap.classList.add('hidden');
       }
     }
@@ -2247,6 +2247,17 @@
       }
     }
 
+    /** Consumes the held food once, whether that's because the bar filled
+     *  or because the button came up. `_ateThisHold` keeps a single hold
+     *  from eating twice - once on fill and again on release. */
+    _finishEating(item) {
+      if (this._ateThisHold || !this.ammo[item.key]) return;
+      this._ateThisHold = true;
+      this.net.eat();
+      this.ammo[item.key]--; this._updateAmmoUI();
+      global.MCSound.eat();
+    }
+
     _updateCharging(nowMs) {
       const item = ITEMS[this.me.slot];
       if (this.mouseDown.right && (item.type === 'bow' || item.type === 'crossbow' || item.type === 'food')) {
@@ -2255,6 +2266,12 @@
         const frac = clamp(held / denom, 0, 1);
         this.hud.chargeWrap.classList.remove('hidden');
         this.hud.chargeFill.style.width = Math.round(frac * 100) + '%';
+        // Food finishes the moment the bar fills rather than waiting for the
+        // button to come up - holding past full used to do nothing at all.
+        if (item.type === 'food' && frac >= 1) {
+          this._finishEating(item);
+          this.hud.chargeWrap.classList.add('hidden');
+        }
         if ((item.type === 'bow' || item.type === 'crossbow') && Math.floor(held * 10) !== this._lastDrawTick) { this._lastDrawTick = Math.floor(held * 10); }
       } else if (this.mouseDown.left && item.key === 'spear' && this._spearChargeStart) {
         const held = (nowMs - this._spearChargeStart) / 1000;
@@ -2912,11 +2929,17 @@
         barWrap.className = 'nametag-hp-wrap';
         const bar = document.createElement('div');
         bar.className = 'nametag-hp';
+        // Absorption sits on its own overlay bar rather than being folded
+        // into the health width: it has to be obvious that the damage is
+        // landing on a shield, not that the target is refusing to die.
+        const absorb = document.createElement('div');
+        absorb.className = 'nametag-absorb';
         barWrap.appendChild(bar);
+        barWrap.appendChild(absorb);
         node.appendChild(nameEl);
         node.appendChild(barWrap);
         document.getElementById('tags').appendChild(node);
-        entry = { node, nameEl, bar };
+        entry = { node, nameEl, bar, absorb };
         tag.set(p.id, entry);
       }
       const node = entry.node;
@@ -2924,6 +2947,11 @@
       const pct = clamp((p.health || 0) / C.MAX_HEALTH, 0, 1);
       entry.bar.style.width = Math.round(pct * 100) + '%';
       entry.bar.style.background = pct > 0.5 ? '#4caf50' : pct > 0.25 ? '#e0a72a' : '#e0432a';
+      if (entry.absorb) {
+        const abs = clamp((p.absorption || 0) / C.MAX_HEALTH, 0, 1);
+        entry.absorb.style.width = Math.round(abs * 100) + '%';
+        entry.absorb.style.left = Math.round(pct * 100) + '%';
+      }
       const vp = this.renderer.viewProj;
       const wx = p.x, wy = p.y + 2.05, wz = p.z;
       const cx4 = vp[0] * wx + vp[4] * wy + vp[8] * wz + vp[12];

@@ -15,8 +15,9 @@ body { font-family: 'Segoe UI', Verdana, monospace; user-select: none; }
   text-shadow: 1px 1px 2px #000, 0 0 4px #000, 0 0 6px #ff2a2a, 0 0 10px #ff2a2a;
   white-space: nowrap;
 }
-.nametag-hp-wrap { width: 52px; height: 5px; background: rgba(0,0,0,0.55); border: 1px solid rgba(0,0,0,0.7); border-radius: 2px; overflow: hidden; }
+.nametag-hp-wrap { position: relative; width: 52px; height: 5px; background: rgba(0,0,0,0.55); border: 1px solid rgba(0,0,0,0.7); border-radius: 2px; overflow: hidden; }
 .nametag-hp { height: 100%; width: 100%; background: #4caf50; transition: width 0.15s ease-out, background 0.2s; }
+.nametag-absorb { position: absolute; top: 0; height: 100%; width: 0; background: #ffd23f; transition: width 0.15s ease-out, left 0.15s ease-out; }
 
 .dmgnum {
   position: absolute; transform: translate(-50%, -100%);

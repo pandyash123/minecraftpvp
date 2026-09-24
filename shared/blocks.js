@@ -596,6 +596,14 @@
     REACH_BLOCK: 5.0,
     REACH_ATTACK: 3.6,
     REACH_ATTACK_SLACK: 1.6, // server side leniency for latency
+    // Armor, Protection and Resistance multiply together, and stacked up
+    // they could previously reach ~100% - a netherite+Protection target
+    // under an egap's Resistance took 0.1 a hit, and anything weaker
+    // rounded to 0 and was thrown away entirely, which is what "immortal"
+    // looked like. A connecting unblocked hit now always lands at least
+    // this share of its raw damage. Shields are applied after the cap and
+    // can still stop a hit outright - that's active defence, not a stat.
+    MAX_DAMAGE_REDUCTION: 0.85,
     REGEN_DELAY: 5.0,
     REGEN_INTERVAL: 2.5,
     SPAWN_PROTECT: 2.5,
