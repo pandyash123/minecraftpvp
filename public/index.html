@@ -28,6 +28,7 @@
     </div>
     <div id="stats">
       <button id="viewModeBtn" type="button" title="Change camera view (F5)">1st Person</button>
+      <button id="shopBtn" type="button" title="Open the shop (B)"><span id="coinCount">0</span> coins &#183; Shop</button>
       <span id="fps">0 fps</span><span id="pingText">0 ms</span>
     </div>
     <div id="killfeed"></div>
@@ -115,6 +116,16 @@
         </div>
       </div>
       <button type="button" id="trimCloseBtn">Done</button>
+    </div>
+  </div>
+
+  <div id="shopPanel" class="hidden">
+    <div class="panel shoppanel">
+      <h1>Shop</h1>
+      <p class="sub">Earn coins by fighting, spend them on upgrades that last the rest of your session.</p>
+      <div class="shopCoins">You have <b id="shopCoins">0</b> coins</div>
+      <div id="shopList"></div>
+      <button type="button" id="shopCloseBtn">Close</button>
     </div>
   </div>
 

@@ -46,10 +46,13 @@
         trimTabs: el('trimTabs'), trimPalette: el('trimPalette'), trimHint: el('trimHint'),
         trimRotateRow: el('trimRotateRow'), trimRotL: el('trimRotL'), trimRotR: el('trimRotR'),
         trimMirrorCheck: el('trimMirrorCheck'), trimMirrorLabel: el('trimMirrorLabel'),
+        shopBtn: el('shopBtn'), coinCount: el('coinCount'), shopPanel: el('shopPanel'),
+        shopCoins: el('shopCoins'), shopList: el('shopList'), shopCloseBtn: el('shopCloseBtn'),
         trimBrushRow: el('trimBrushRow'), trimClearBtn: el('trimClearBtn'), trimExportBtn: el('trimExportBtn'),
         trimImportBtn: el('trimImportBtn'), trimImportInput: el('trimImportInput'), trimCloseBtn: el('trimCloseBtn')
       };
       this.inventoryOpen = false;
+      this.shopOpen = false;
       this.heartNodes = []; // cached <canvas> elements so we only redraw what changed
       this.activeEffects = {}; // kind -> {level, until (performance.now() ms)}
 
@@ -185,6 +188,69 @@
       return out;
     }
 
+    /**
+     * The in-match shop. Coins and levels are whatever the server last told
+     * us (see net 'shopState'); clicking Buy only ever sends a request, so
+     * the panel can't talk itself into an upgrade it hasn't been granted.
+     */
+    _toggleShop() {
+      if (!this.me) return;
+      this.shopOpen = !this.shopOpen;
+      this.hud.shopPanel.classList.toggle('hidden', !this.shopOpen);
+      if (this.shopOpen) {
+        this._renderShop();
+        document.exitPointerLock && document.exitPointerLock();
+      } else {
+        this._requestPointerLock();
+      }
+    }
+
+    _renderShop() {
+      const coins = (this.shop && this.shop.coins) | 0;
+      if (this.hud.coinCount) this.hud.coinCount.textContent = coins;
+      if (!this.shopOpen || !this.hud.shopList) return;
+      this.hud.shopCoins.textContent = coins;
+      const levels = (this.shop && this.shop.upgrades) || {};
+      this.hud.shopList.innerHTML = '';
+      for (const key of MC.SHOP_KEYS) {
+        const up = MC.SHOP.UPGRADES[key];
+        const level = levels[key] | 0;
+        const cost = MC.shopCost(key, level);
+        const maxed = cost === null;
+
+        const row = document.createElement('div');
+        row.className = 'shopItem' + (maxed ? ' maxed' : '');
+        const info = document.createElement('div');
+        info.className = 'shopInfo';
+        const name = document.createElement('div');
+        name.className = 'shopName';
+        // Shows what the NEXT level buys, or what the maxed one is worth.
+        const shown = maxed ? MC.shopEffect(key, level) : MC.shopEffect(key, level + 1);
+        name.textContent = up.name + '  (x' + shown.toFixed(2).replace(/0$/, '') + ' ' + up.unit + ')';
+        const desc = document.createElement('div');
+        desc.className = 'shopDesc';
+        desc.textContent = up.desc;
+        const pips = document.createElement('div');
+        pips.className = 'shopPips';
+        for (let i = 0; i < MC.SHOP.MAX_LEVEL; i++) {
+          const pip = document.createElement('div');
+          pip.className = 'shopPip' + (i < level ? ' on' : '');
+          pips.appendChild(pip);
+        }
+        info.appendChild(name); info.appendChild(desc); info.appendChild(pips);
+
+        const buy = document.createElement('button');
+        buy.type = 'button';
+        buy.className = 'shopBuy';
+        buy.textContent = maxed ? 'Maxed' : cost + ' coins';
+        buy.disabled = maxed || coins < cost;
+        buy.addEventListener('click', () => { this.net.shopBuy(key); global.MCSound.click(); });
+
+        row.appendChild(info); row.appendChild(buy);
+        this.hud.shopList.appendChild(row);
+      }
+    }
+
     /** The painted grid that belongs to an icon, if any - maps an item
      * icon key onto its trim slot so the hotbar/inventory previews match
      * the real piece (see itemIcon's TRIMMABLE_ICONS). */
@@ -228,6 +294,13 @@
       const blank = () => new Array(MC.TRIM_CELLS).fill(0);
       // Each side of a piece keeps its own grid, so the front of a helmet
       // can differ from its back. Flat items only ever use 'front'.
+      // readGrid never creates anything - drawing touches all six sides, and
+      // materialising a blank grid per side would save six empty arrays for
+      // a piece nobody has painted yet.
+      const readGrid = (slot, face) => {
+        const faces = this._trims[slot];
+        return (faces && faces[face]) || null;
+      };
       const gridFor = (slot, face) => {
         const faces = this._trims[slot] || (this._trims[slot] = {});
         return faces[face] || (faces[face] = blank());
@@ -325,10 +398,10 @@
           for (const pf of projected(slot)) {
             const { f, sA, sB, sC } = pf;
             const [ru, rv, rw, rh] = f.rect;
-            const grid = gridFor(slot, f.face);
+            const grid = readGrid(slot, f.face);
             for (let ty = 0; ty < G; ty++) {
               for (let tx = 0; tx < G; tx++) {
-                const idx = grid[ty * G + tx];
+                const idx = grid ? grid[ty * G + tx] : 0;
                 const px = idx ? paletteRGB(idx) : basePixel(ru + (tx + 0.5) * rw / G, rv + (ty + 0.5) * rh / G);
                 // Shaded by the face's own baked light so the preview reads
                 // as a solid 3D object rather than a flat silhouette. Done
@@ -354,12 +427,12 @@
           // Flat items: the real icon at full size, painted over directly.
           const icon = TX.itemIcon(ICON_FOR[slot], cv.width, tier());
           ctx.drawImage(icon, 0, 0);
-          const grid = gridFor(slot, 'front');
+          const grid = readGrid(slot, 'front');
           const cell = cv.width / G;
           ctx.globalAlpha = 0.85;
           for (let ty = 0; ty < G; ty++) {
             for (let tx = 0; tx < G; tx++) {
-              const idx = grid[ty * G + tx];
+              const idx = grid ? grid[ty * G + tx] : 0;
               if (!idx) continue;
               ctx.fillStyle = MC.TRIM_PALETTE[idx];
               ctx.fillRect(tx * cell, ty * cell, cell + 0.5, cell + 0.5);
@@ -680,6 +753,12 @@
         slot: 0, health: C.MAX_HEALTH, absorption: 0, alive: true, blocking: false
       };
       this.mySkin = null;
+      // Shop state is owned by the server (see its 'shopBuy' handler); this
+      // is just the last snapshot it sent us.
+      this.shop = init.shop || { coins: 0, upgrades: MC.freshUpgrades() };
+      this.shopOpen = false;
+      this.hud.shopPanel.classList.add('hidden');
+      this._renderShop();
       this.yaw = this.me.yaw; this.pitch = 0;
       // Camera perspective: 0 = first person, 1 = third person (behind,
       // over-the-shoulder), 2 = third person front (selfie-style, looking
@@ -870,6 +949,7 @@
         this.me.blocking = false;
         this.shieldStunUntil = 0;
         this.deadUntilRespawn = false;
+        if (d.ammo) { this.ammo = d.ammo; this._updateAmmoUI(); }
         this.hud.deathScreen.classList.add('hidden');
         this._updateHealthUI();
         this._requestPointerLock();
@@ -963,6 +1043,7 @@
         this.projectiles.delete(d.id);
       });
       net.on('snapshot', s => this._applySnapshot(s));
+      net.on('shopState', st => { this.shop = st; this._renderShop(); });
       net.on('disconnected', reason => {
         // This only ever fires for an unexpected drop (a deliberate leave-
         // to-menu goes through Net.disconnect(), which strips this listener
@@ -1057,6 +1138,8 @@
         // Same three-way camera cycle as vanilla Minecraft's F5 - block the
         // browser's own "refresh page" default or every press would reload.
         if (e.code === 'F5') { e.preventDefault(); this._cyclePerspective(); return; }
+        if (e.code === 'KeyB') { e.preventDefault(); this._toggleShop(); return; }
+        if (this.shopOpen) { if (e.code === 'Escape') this._toggleShop(); return; }
         if (this.inventoryOpen) {
           if (e.code === 'Escape') this._toggleInventory();
           return; // swallow movement/hotbar keys while browsing the inventory
@@ -1106,6 +1189,8 @@
       this.hud.resumeBtn.addEventListener('click', () => this._requestPointerLock());
       this.hud.leaveBtn.addEventListener('click', () => this._leaveToMenu());
       this.hud.viewModeBtn.addEventListener('click', () => this._cyclePerspective());
+      this.hud.shopBtn.addEventListener('click', () => this._toggleShop());
+      this.hud.shopCloseBtn.addEventListener('click', () => this._toggleShop());
       document.addEventListener('mousemove', e => {
         if (!this.pointerLocked) return;
         const sens = 0.0022;
@@ -2037,7 +2122,9 @@
     _updateLocalPlayer(dt) {
       // Browsing the inventory stops new movement input but not physics -
       // you keep falling/sliding, same as vanilla Minecraft.
-      const inv = this.inventoryOpen;
+      // Browsing the shop suspends movement input the same way the
+      // inventory does - physics keeps running, you just stop steering.
+      const inv = this.inventoryOpen || this.shopOpen;
       // A spear Lunge is a burst of velocity way above normal walk/sprint
       // speed - the ground-movement model in shared/physics.js pulls
       // horizontal velocity toward whatever WASD currently asks for every
@@ -2075,6 +2162,10 @@
       let speedMult = 1;
       if (speedEff && nowMs < speedEff.until) speedMult += C.SPEED_PCT_PER_LEVEL * speedEff.level;
       if (slowEff && nowMs < slowEff.until) speedMult = Math.max(0.05, speedMult - C.SLOWNESS_PCT_PER_LEVEL * slowEff.level);
+      // Swiftness, bought from the shop - multiplies whatever the potions
+      // worked out to, so it stacks with Speed and is still blunted by
+      // Slowness rather than cancelling it.
+      speedMult *= MC.shopEffect('speed', this.shop && this.shop.upgrades && this.shop.upgrades.speed);
 
       // Elytra: jump while airborne starts a glide - matches vanilla's
       // forgiving activation (you don't need to already be falling fast,

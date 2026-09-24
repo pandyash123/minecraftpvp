@@ -33,7 +33,7 @@
         const events = ['playerJoin', 'playerLeave', 'spawned', 'respawn', 'teleport', 'hurt', 'heal',
           'killreward', 'hp', 'death', 'block', 'snapshot', 'projectile', 'projectileGone', 'swing',
           'hitmarker', 'arrowHit', 'effect', 'scores', 'chat', 'ammo', 'shieldStun', 'launch',
-          'effects', 'weather', 'elytraUnlocked', 'wolfSpawn', 'wolfHp', 'wolfDeath', 'wolfTeleport'];
+          'effects', 'weather', 'elytraUnlocked', 'wolfSpawn', 'wolfHp', 'wolfDeath', 'wolfTeleport', 'shopState'];
         for (const e of events) socket.on(e, data => this.emit2(e, data));
 
         socket.on('disconnect', reason => this.emit2('disconnected', reason));
@@ -79,6 +79,7 @@
     hitAnchor(x, y, z) { if (this.socket) this.socket.emit('hitAnchor', { x, y, z }); }
     spawnWolf() { if (this.socket) this.socket.emit('spawnWolf'); }
     chat(text) { if (this.socket) this.socket.emit('chat', text); }
+    shopBuy(key) { if (this.socket) this.socket.emit('shopBuy', key); }
   }
 
   global.MCNet = Net;

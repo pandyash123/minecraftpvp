@@ -239,6 +239,11 @@ const BLOCK_ITEM_KEY = {};
 for (const item of MC.ITEMS) if (item.type === 'block') BLOCK_ITEM_KEY[item.block] = item.key;
 // Every potion key, for the per-kill restock in kill() below.
 const POTION_KEYS = MC.ITEMS.filter(i => i.type === 'potion').map(i => i.key);
+// Items a kill hands out one of, with a Looting-scaled chance of 2-3
+// instead (see kill()). Deliberately a list rather than hardcoded keys:
+// giving a future item the same "rare but steady" drop is a one-line
+// change here, with no other wiring needed.
+const KILL_BONUS_ITEMS = ['totem', 'egap', 'wolf_spawn_egg'];
 
 function freshAmmo() {
   return {
@@ -368,6 +373,11 @@ function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, s
     // cosmetic here, and included in publicPlayer() so everyone else's
     // client can render them too.
     trims: isBot ? null : MC.sanitizeTrims(trims),
+    // In-match shop (see the 'shopBuy' handler). Bots never buy anything,
+    // so their levels stay at zero and every effect below resolves to 1.
+    coins: isBot ? 0 : MC.SHOP.START_COINS,
+    upgrades: MC.freshUpgrades(),
+    lastCoinTick: now(),
     enchants: isBot ? MC.defaultEnchantOpts() : mergeEnchantOpts(enchantOpts),
     x: s[0], y: s[1], z: s[2],
     vx: 0, vy: 0, vz: 0,
@@ -391,6 +401,30 @@ function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, s
   };
 }
 
+/** freshAmmo() scaled by whatever Starting Gear level the player has
+ * bought - applied on every respawn and the moment the upgrade is bought,
+ * so it never takes a death to feel the purchase. */
+function upgradedAmmo(p) {
+  const mult = MC.shopEffect('gear', p.upgrades && p.upgrades.gear);
+  const ammo = freshAmmo();
+  if (mult === 1) return ammo;
+  for (const k in ammo) ammo[k] = Math.floor(ammo[k] * mult);
+  return ammo;
+}
+
+/** Current coins + upgrade levels, for the owning client's shop UI. */
+function shopState(p) {
+  return { coins: p.coins | 0, upgrades: Object.assign({}, p.upgrades) };
+}
+function sendShop(p) {
+  if (p.socket) p.socket.emit('shopState', shopState(p));
+}
+function awardCoins(p, amount) {
+  if (!p || p.bot || amount <= 0) return;
+  p.coins = (p.coins | 0) + amount;
+  sendShop(p);
+}
+
 function respawn(p) {
   // A training dummy always returns to the exact spot it was placed at,
   // rather than a random arena spawn - it's meant to be a fixed target.
@@ -403,7 +437,7 @@ function respawn(p) {
   // when you died.
   p.absorption = 4;
   p.alive = true;
-  p.ammo = freshAmmo();
+  p.ammo = upgradedAmmo(p);
   p.spawnAt = now();
   p.lastDamage = -99;
   p.fallFrom = null;
@@ -424,7 +458,10 @@ function respawn(p) {
     p.chestSlot = p.bonusItem === 'elytra_firework' ? 'elytra' : 'chestplate';
     p.gliding = false;
   }
-  if (p.socket) p.socket.emit('respawn', { x: p.x, y: p.y, z: p.z, health: p.health, absorption: p.absorption });
+  // Ammo goes with it: respawn refills the pouch server-side, and without
+  // sending it the client's HUD keeps showing whatever was left when you
+  // died. Doubly visible now the shop's Starting Gear changes the amount.
+  if (p.socket) p.socket.emit('respawn', { x: p.x, y: p.y, z: p.z, health: p.health, absorption: p.absorption, ammo: p.ammo });
   if (p.socket) p.socket.emit('effects', {});
   io.emit('spawned', { id: p.id, x: p.x, y: p.y, z: p.z });
 }
@@ -736,28 +773,37 @@ function kill(victim, source, cause) {
     // vanilla's "the weapon that dealt the killing blow") multiplies the
     // whole restock below - simulated as bonus ammo since this game has no
     // physical item drops to multiply.
-    const lootMult = cause === 'sword' && hasEnchant(source, 'sword', 'looting') ? C.LOOTING_KILL_MULT : 1;
+    // The shop's Loot Haul upgrade stacks on top of Looting, so a kill can
+    // restock several times what it used to for someone who's invested in it.
+    const lootMult = (cause === 'sword' && hasEnchant(source, 'sword', 'looting') ? C.LOOTING_KILL_MULT : 1)
+      * MC.shopEffect('loot', source.upgrades && source.upgrades.loot);
+    // Coins for the shop - a flat bounty plus a little more the longer the
+    // killer's current streak is running.
+    awardCoins(source, Math.round(MC.SHOP.COIN_PER_KILL + MC.SHOP.COIN_KILL_STREAK_BONUS * Math.max(0, source.streak - 1)));
     source.health = Math.min(C.MAX_HEALTH, source.health + 4);
-    source.ammo.arrow += Math.floor(C.ARROW_AMMO / 2) * lootMult;
-    source.ammo.pearl += Math.floor(ITEM_BY_KEY.pearl.ammo / 2) * lootMult;
-    source.ammo.gapple += Math.floor(ITEM_BY_KEY.gapple.ammo / 2) * lootMult;
-    source.ammo.windcharge += Math.floor(ITEM_BY_KEY.windcharge.ammo / 2) * lootMult;
+    // Floored at the end rather than per-factor: Loot Haul's multiplier is
+    // fractional, and fractional ammo counts leak into the HUD as 7.5 arrows.
+    const lootAdd = n => Math.floor(n * lootMult);
+    source.ammo.arrow += lootAdd(Math.floor(C.ARROW_AMMO / 2));
+    source.ammo.pearl += lootAdd(Math.floor(ITEM_BY_KEY.pearl.ammo / 2));
+    source.ammo.gapple += lootAdd(Math.floor(ITEM_BY_KEY.gapple.ammo / 2));
+    source.ammo.windcharge += lootAdd(Math.floor(ITEM_BY_KEY.windcharge.ammo / 2));
     // Every potion in the killer's own loadout restocks a flat few, same
     // "keep the fight going" idea as the ammo above - only for potions they
     // actually have access to, not every potion that exists.
     for (const key of POTION_KEYS) {
-      if (playerHasItem(source, key)) source.ammo[key] = (source.ammo[key] || 0) + C.POTION_KILL_RESTOCK * lootMult;
+      if (playerHasItem(source, key)) source.ammo[key] = (source.ammo[key] || 0) + lootAdd(C.POTION_KILL_RESTOCK);
     }
     // Water/lava buckets and TNT/TNT Minecart restock the same "half a
     // fresh stack" way as arrow/pearl/gapple/windcharge above, just gated on
     // actually having them in the loadout (web-kit only, same as potions).
     for (const key of ['water_bucket', 'lava_bucket', 'tnt', 'tnt_minecart']) {
-      if (playerHasItem(source, key)) source.ammo[key] = (source.ammo[key] || 0) + Math.floor(ITEM_BY_KEY[key].ammo / 2) * lootMult;
+      if (playerHasItem(source, key)) source.ammo[key] = (source.ammo[key] || 0) + lootAdd(Math.floor(ITEM_BY_KEY[key].ammo / 2));
     }
-    // Totem of Undying and egap: 1 guaranteed per kill, with a chance of
-    // getting 2-3 instead once Looting III is active - both meant to stay
-    // scarce even so, unlike the flat half-stack restocks above.
-    for (const key of ['totem', 'egap']) {
+    // 1 guaranteed per kill, with a chance of 2-3 instead once Looting (or
+    // the shop's Loot Haul) is in play - these stay scarce even so, unlike
+    // the flat half-stack restocks above. See KILL_BONUS_ITEMS.
+    for (const key of KILL_BONUS_ITEMS) {
       if (!playerHasItem(source, key)) continue;
       let amount = 1;
       if (lootMult > 1 && Math.random() < C.LOOT_BONUS_CHANCE) amount = Math.floor(rand(C.LOOT_BONUS_MIN, C.LOOT_BONUS_MAX + 1));
@@ -1846,6 +1892,13 @@ function tick() {
     }
     if (p.bot) stepBot(p, dt, t);
 
+    // A slow coin trickle for the shop, so a player who isn't getting kills
+    // still creeps towards their first upgrade (see MC.SHOP).
+    if (!p.bot && t - p.lastCoinTick >= MC.SHOP.COIN_IDLE_SECONDS) {
+      p.lastCoinTick = t;
+      awardCoins(p, MC.SHOP.COIN_IDLE_AMOUNT);
+    }
+
     // natural regeneration
     if (p.health > 0 && p.health < C.MAX_HEALTH &&
         t - p.lastDamage > C.REGEN_DELAY && t - p.lastRegen > C.REGEN_INTERVAL) {
@@ -2057,6 +2110,7 @@ io.on('connection', socket => {
       players: [...players.values()].map(publicPlayer),
       you: publicPlayer(me),
       ammo: me.ammo,
+      shop: shopState(me),
       serverTime: Date.now(),
       weather: weather
     });
@@ -2245,6 +2299,29 @@ io.on('connection', socket => {
     me.ammo.wolf_spawn_egg--;
     socket.emit('ammo', me.ammo);
     spawnWolf(me, me.dogArmor);
+  });
+
+  // Shop purchases are decided entirely here: the client sends only which
+  // upgrade it wants, and gets the authoritative coins/levels back.
+  socket.on('shopBuy', key => {
+    if (!me || typeof key !== 'string') return;
+    const up = MC.SHOP.UPGRADES[key];
+    if (!up) return;
+    const level = me.upgrades[key] | 0;
+    const cost = MC.shopCost(key, level);
+    if (cost === null) { socket.emit('chat', { system: true, text: up.name + ' is already maxed out.' }); return; }
+    if (me.coins < cost) { socket.emit('chat', { system: true, text: 'Not enough coins for ' + up.name + ' (need ' + cost + ').' }); return; }
+    me.coins -= cost;
+    me.upgrades[key] = level + 1;
+    // Starting Gear is about what you spawn with, but waiting for a death
+    // to feel a purchase is miserable - top up on the spot as well.
+    if (key === 'gear') {
+      const ammo = upgradedAmmo(me);
+      for (const k in ammo) me.ammo[k] = Math.max(me.ammo[k] | 0, ammo[k]);
+      socket.emit('ammo', me.ammo);
+    }
+    sendShop(me);
+    socket.emit('chat', { system: true, text: 'Bought ' + up.name + ' ' + me.upgrades[key] + '/' + MC.SHOP.MAX_LEVEL + '.' });
   });
 
   socket.on('shoot', d => {

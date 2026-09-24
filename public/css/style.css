@@ -69,6 +69,32 @@ body { font-family: 'Segoe UI', Verdana, monospace; user-select: none; }
 #stats { position: absolute; right: 12px; top: 12px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; color: #fff; font-size: 12px; text-shadow: 1px 1px 2px #000; }
 #viewModeBtn { pointer-events: auto; cursor: pointer; background: rgba(0,0,0,0.45); color: #fff; border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; padding: 4px 10px; font-size: 12px; font-family: inherit; text-shadow: none; }
 #viewModeBtn:hover { background: rgba(0,0,0,0.65); }
+#shopBtn { pointer-events: auto; cursor: pointer; background: rgba(0,0,0,0.45); color: #ffd23f; border: 1px solid rgba(255,210,63,0.5); border-radius: 4px; padding: 4px 10px; font-size: 12px; font-family: inherit; text-shadow: none; font-weight: 700; }
+#shopBtn:hover { background: rgba(0,0,0,0.7); }
+
+#shopPanel {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.55); z-index: 26; pointer-events: auto;
+}
+/* .panel.shoppanel, not just .shoppanel: this block sits above .panel in
+   the file, so at equal specificity .panel's translucent background would
+   win and the world would show through the shop's text. */
+.panel.shoppanel { min-width: 420px; max-width: 520px; background: rgba(14, 20, 28, 0.97); border: 1px solid rgba(255,255,255,0.14); }
+.shopCoins { margin: 12px 0 4px; font-size: 13px; }
+.shopCoins b { color: #ffd23f; font-size: 16px; }
+.shopItem { display: flex; align-items: center; gap: 12px; text-align: left; margin-top: 10px; padding: 10px 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.14); border-radius: 6px; }
+.shopItem.maxed { opacity: 0.6; }
+.shopInfo { flex: 1; }
+.shopName { font-size: 13px; font-weight: 700; }
+.shopDesc { font-size: 11px; opacity: 0.7; margin-top: 2px; }
+.shopPips { display: flex; gap: 3px; margin-top: 6px; }
+.shopPip { width: 22px; height: 5px; border-radius: 2px; background: rgba(255,255,255,0.18); }
+.shopPip.on { background: #4caf50; }
+.shopBuy { min-width: 96px; padding: 8px 10px; font-size: 12px; font-weight: 700; border-radius: 5px; border: none; background: #4caf50; color: #fff; cursor: pointer; font-family: inherit; }
+.shopBuy:hover:not(:disabled) { background: #5cc760; }
+.shopBuy:disabled { background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.5); cursor: default; }
+#shopCloseBtn { margin-top: 18px; width: 100%; padding: 10px; font-size: 14px; font-weight: 700; border: none; border-radius: 5px; background: #4caf50; color: #fff; cursor: pointer; letter-spacing: 1px; }
+#shopCloseBtn:hover { background: #5cc760; }
 
 #killfeed { position: absolute; right: 12px; top: 60px; display: flex; flex-direction: column; gap: 3px; align-items: flex-end; }
 .kf { background: rgba(0,0,0,0.5); color: #fff; padding: 3px 8px; border-radius: 3px; font-size: 12px; animation: fadein 0.2s; }

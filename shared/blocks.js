@@ -504,15 +504,16 @@
    * stale/tampered payload is dropped rather than trusted. Returns null when
    * nothing survives, so "no trims" is one value instead of an empty object.
    * A slot given as a single bare grid (the older all-sides-the-same format)
-   * is accepted and spread across every face. */
+   * is read as that design on the FRONT only - carrying it onto all six
+   * faces instead would resurrect exactly the wrapping this per-face split
+   * exists to get rid of. */
   function sanitizeTrims(trims) {
     if (!trims || typeof trims !== 'object') return null;
     var out = null, i, j;
     for (i = 0; i < TRIM_SLOTS.length; i++) {
       var slot = TRIM_SLOTS[i], val = trims[slot], faces = null;
       if (isValidTrim(val)) {
-        faces = {};
-        for (j = 0; j < TRIM_FACES.length; j++) faces[TRIM_FACES[j]] = val;
+        faces = { front: val };
       } else if (val && typeof val === 'object') {
         for (j = 0; j < TRIM_FACES.length; j++) {
           if (!isValidTrim(val[TRIM_FACES[j]])) continue;
@@ -522,6 +523,64 @@
       }
       if (faces) { if (!out) out = {}; out[slot] = faces; }
     }
+    return out;
+  }
+
+  // ------------------------------------------------------------- shop ----
+  // An in-match shop: coins are earned by fighting and spent on upgrades
+  // that last for the session. Everything here is server-authoritative
+  // (see the 'shopBuy' handler) - the client only ever draws what it's
+  // told, so a tampered client can't award itself levels.
+  var SHOP = {
+    START_COINS: 10,
+    COIN_PER_KILL: 10,
+    COIN_KILL_STREAK_BONUS: 2,  // extra per kill in the current streak
+    // A slow trickle so someone having a bad run still reaches the first
+    // upgrade instead of being locked out of the whole system.
+    COIN_IDLE_AMOUNT: 1,
+    COIN_IDLE_SECONDS: 12,
+    MAX_LEVEL: 3,
+    // costs[n] buys level n+1. effect[n] is the multiplier at level n+1.
+    UPGRADES: {
+      gear: {
+        key: 'gear', name: 'Starting Gear', unit: 'ammo',
+        desc: 'Spawn with more of everything you carry',
+        costs: [15, 35, 65], effect: [1.4, 1.8, 2.3]
+      },
+      loot: {
+        key: 'loot', name: 'Loot Haul', unit: 'per kill',
+        desc: 'Every kill restocks you with far more',
+        costs: [15, 35, 65], effect: [1.5, 2.0, 2.6]
+      },
+      speed: {
+        key: 'speed', name: 'Swiftness', unit: 'move speed',
+        desc: 'Permanently quicker on your feet',
+        costs: [20, 45, 80], effect: [1.08, 1.15, 1.22]
+      }
+    }
+  };
+  var SHOP_KEYS = ['gear', 'loot', 'speed'];
+
+  /** The multiplier an upgrade is worth at `level` (1 when unbought). */
+  function shopEffect(key, level) {
+    var up = SHOP.UPGRADES[key];
+    if (!up || !level) return 1;
+    var i = Math.max(0, Math.min(up.effect.length - 1, level - 1));
+    return up.effect[i];
+  }
+
+  /** What the next level of an upgrade costs, or null when maxed. */
+  function shopCost(key, level) {
+    var up = SHOP.UPGRADES[key];
+    if (!up || level >= up.costs.length) return null;
+    return up.costs[level];
+  }
+
+  /** A clean {gear,loot,speed} level map - used for a fresh player and to
+   * scrub anything a client claims about its own upgrades. */
+  function freshUpgrades() {
+    var out = {};
+    for (var i = 0; i < SHOP_KEYS.length; i++) out[SHOP_KEYS[i]] = 0;
     return out;
   }
 
@@ -916,6 +975,11 @@
     isValidTrim: isValidTrim,
     sanitizeTrims: sanitizeTrims,
     hasAnyTrim: hasAnyTrim,
+    SHOP: SHOP,
+    SHOP_KEYS: SHOP_KEYS,
+    shopEffect: shopEffect,
+    shopCost: shopCost,
+    freshUpgrades: freshUpgrades,
     COMBAT: COMBAT,
     PHYS: PHYS,
     breakTime: breakTime,
