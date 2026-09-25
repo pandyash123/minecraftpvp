@@ -653,7 +653,10 @@ function effectsSnapshot(p, t) {
 
 // --------------------------------------------------------------- combat ---
 function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
-  if (!victim.alive || amount <= 0) return;
+  // `amount <= 0` alone lets NaN through (every comparison with NaN is
+  // false), and one NaN hit poisons health for good: it can never read as
+  // <= 0 again, so the player is stuck "alive" at 0 hp and unkillable.
+  if (!victim.alive || !(amount > 0) || !isFinite(amount)) return;
   const t = now();
   if (t - victim.spawnAt < C.SPAWN_PROTECT && source && source.id !== victim.id) return;
 
@@ -804,8 +807,9 @@ function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
   // Totem of Undying: a hit that would kill you is caught instead, if
   // you have one equipped in your offhand (drag it there in the inventory
   // screen) - just owning one isn't enough, same as vanilla. Doesn't save
-  // you from the void either.
-  if (victim.health <= 0 && cause !== 'void' && cause !== 'kill257' && victim.offhandKey === 'totem' && (victim.ammo.totem || 0) > 0) {
+  // you from the void, or from /kill (vanilla's /kill ignores totems too -
+  // otherwise a stockpile of them made /kill do nothing at all).
+  if (victim.health <= 0 && cause !== 'void' && cause !== 'kill257' && cause !== 'suicide' && victim.offhandKey === 'totem' && (victim.ammo.totem || 0) > 0) {
     victim.ammo.totem--;
     victim.health = C.TOTEM_HEALTH;
     victim.absorption = 0;
@@ -886,7 +890,12 @@ function kill(victim, source, cause) {
       if (!playerHasItem(source, key)) continue;
       let amount = 1;
       if (lootMult > 1 && Math.random() < C.LOOT_BONUS_CHANCE) amount = Math.floor(rand(C.LOOT_BONUS_MIN, C.LOOT_BONUS_MAX + 1));
-      source.ammo[key] = (source.ammo[key] || 0) + amount;
+      let next = (source.ammo[key] || 0) + amount;
+      // Totems never stack past what you spawn with: each one is a free
+      // extra life, so an uncapped kill restock let anyone on a streak pile
+      // up dozens and become effectively unkillable in multiplayer.
+      if (key === 'totem') next = Math.max(source.ammo.totem || 0, Math.min(next, upgradedAmmo(source).totem));
+      source.ammo[key] = next;
     }
     // Firework Rockets restock a flat amount per kill, no Looting scaling.
     if (playerHasItem(source, 'firework')) source.ammo.firework = (source.ammo.firework || 0) + C.FIREWORK_KILL_RESTOCK;
@@ -1262,7 +1271,7 @@ function stepProjectiles(dt) {
             // (see spawnProjectile's meta) - each uses its own damage range,
             // and only the bow's own enchants (Power/Punch/Flame) apply to
             // a bow shot specifically, not a crossbow bolt.
-            const weaponItem = ITEM_BY_KEY[pr.weaponKey] || MC.ITEMS[1];
+            const weaponItem = ITEM_BY_KEY[pr.weaponKey] || ITEM_BY_KEY.bow;
             const isBowShot = weaponItem.key === 'bow';
             let dmg = weaponItem.minDamage + (weaponItem.maxDamage - weaponItem.minDamage) * pr.power;
             if (isBowShot && owner && hasEnchant(owner, 'bow', 'power')) dmg += C.POWER_DMG_BONUS;
@@ -1326,7 +1335,7 @@ function stepProjectiles(dt) {
           // lands on TNT/TNT Minecart -> lights its fuse, same as flint and
           // steel would.
           const owner = players.get(pr.owner);
-          const weaponItem = ITEM_BY_KEY[pr.weaponKey] || MC.ITEMS[1];
+          const weaponItem = ITEM_BY_KEY[pr.weaponKey] || ITEM_BY_KEY.bow;
           const flameShot = pr.burning || (weaponItem.key === 'bow' && owner && hasEnchant(owner, 'bow', 'flame'));
           if (flameShot) igniteTNTBlock(Math.floor(nx), Math.floor(ny), Math.floor(nz), pr.owner);
         }
@@ -1990,7 +1999,7 @@ function stepBot(bot, dt, t) {
       let vy = aimY - (bot.y + MC.PHYS.EYE);
       let vz = target.z - bot.z + rand(-err, err) * dist;
       const l = Math.hypot(vx, vy, vz) || 1;
-      spawnProjectile(bot, 'arrow', bot.x, bot.y + MC.PHYS.EYE, bot.z, vx / l, vy / l, vz / l, 1);
+      spawnProjectile(bot, 'arrow', bot.x, bot.y + MC.PHYS.EYE, bot.z, vx / l, vy / l, vz / l, 1, { weaponKey: 'bow' });
     } else if (dist < 6) {
       bot.slot = weapon.slot;
     }
