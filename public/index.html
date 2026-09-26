@@ -29,6 +29,7 @@
     <div id="stats">
       <button id="viewModeBtn" type="button" title="Change camera view (F5)">1st Person</button>
       <button id="shopBtn" type="button" title="Open the shop (B)"><span id="coinCount">0</span> coins &#183; Shop</button>
+      <button id="duelBtn" type="button" title="Challenge someone to a duel (G)">Duel</button>
       <span id="fps">0 fps</span><span id="pingText">0 ms</span>
     </div>
     <div id="killfeed"></div>
@@ -42,7 +43,7 @@
         <tbody id="scoreboardBody"></tbody>
       </table>
     </div>
-    <div id="hint" class="hidden">Click to look around &middot; WASD move &middot; Space jump &middot; LMB attack/mine &middot; RMB use/place/block &middot; 1-9 or scroll to switch item &middot; E inventory &middot; Esc pause &middot; Tab scoreboard &middot; Enter chat</div>
+    <div id="hint" class="hidden">Click to look around &middot; WASD move &middot; Space jump &middot; LMB attack/mine &middot; RMB use/place/block &middot; 1-9 or scroll to switch item &middot; E inventory &middot; B shop &middot; G duel &middot; Esc pause &middot; Tab scoreboard &middot; Enter chat</div>
   </div>
 
   <div id="pauseMenu" class="hidden">
@@ -129,6 +130,40 @@
     </div>
   </div>
 
+  <div id="duelPanel" class="hidden">
+    <div class="panel shoppanel">
+      <h1>Duel</h1>
+      <p class="sub">A private 1v1 in a random arena - just the two of you. First to die loses.</p>
+      <label>Opponent</label>
+      <select id="duelTarget"></select>
+      <div id="duelBotOpts" class="hidden">
+        <label>Bot difficulty</label>
+        <select id="duelBotDiff">
+          <option value="easy">Easy</option>
+          <option value="normal" selected>Normal</option>
+          <option value="hard">Hard</option>
+        </select>
+        <label class="checkline"><input type="checkbox" id="duelBotHacks"> Give the bot hacks (reach, extra damage, hovering)</label>
+      </div>
+      <label>Your kit</label>
+      <select id="duelKit"></select>
+      <p class="sub">If you and your opponent pick different kits, it's a coin flip which one you fight with.</p>
+      <button type="button" id="duelSendBtn">Challenge</button>
+      <button type="button" id="duelCloseBtn" class="secondary">Close</button>
+    </div>
+  </div>
+
+  <div id="duelInvite" class="hidden">
+    <div id="duelInviteText"></div>
+    <label>Your kit <select id="duelInviteKit"></select></label>
+    <div class="duelInviteBtns">
+      <button type="button" id="duelAcceptBtn">Accept</button>
+      <button type="button" id="duelDeclineBtn" class="secondary">Decline</button>
+    </div>
+  </div>
+
+  <div id="duelBanner" class="hidden"></div>
+
   <div id="deathScreen" class="hidden">
     <div class="panel">
       <h1>YOU DIED</h1>
@@ -152,16 +187,34 @@
       <input id="nameInput" maxlength="16" placeholder="Your name" autocomplete="off">
       <label>Your kit</label>
       <select id="kitSelect">
-        <option value="sword">Sword PvP (no axe or cobwebs)</option>
-        <option value="axe">Axe PvP (no cobwebs)</option>
-        <option value="web" selected>Web PvP (everything)</option>
+        <optgroup label="Classic">
+          <option value="sword">Sword PvP (no axe or cobwebs)</option>
+          <option value="axe">Axe PvP (no cobwebs)</option>
+          <option value="web" selected>Web PvP (everything)</option>
+        </optgroup>
+        <optgroup label="Preset kits (fixed armor, sword and axe)">
+          <option value="crystal">Crystal PvP - netherite, crystals, anchors, totems</option>
+          <option value="mace">Mace / Rocket - netherite, mace, elytra, fireworks</option>
+          <option value="nodebuff">Netherite Pot / NoDebuff - netherite, potions</option>
+          <option value="cart">Cart PvP - netherite, TNT minecarts, rails</option>
+          <option value="axeshield">Axe Shield - diamond, axe, crossbow</option>
+          <option value="smp">SMP / Lifesteal - netherite, Harming arrows, totems</option>
+          <option value="duel">Sword Duel - diamond, sword and gapples only</option>
+          <option value="uhc">Modern UHC - diamond, buckets, cobwebs</option>
+          <option value="archer">Wind Charge Archer - chainmail, bows, wind charges</option>
+        </optgroup>
       </select>
+      <p class="sub">Preset kits ignore the netherite and tipped-arrow options below and use their own gear.</p>
       <label>Arena</label>
       <select id="arenaSelect">
         <option value="classic" selected>Ruined Keep - grass, trees and a terraced pyramid</option>
         <option value="magma">Magma Pit - obsidian plateau pocked with lava</option>
         <option value="skyward">Skyward - floating islands over a barren floor</option>
-        <option value="frost">Frostbite - a glass keep on a frozen lake</option>
+        <option value="frost">Frostbite - a glass keep on a slippery frozen lake</option>
+        <option value="colosseum">Lava Colosseum - a sand pit ringed by a lava moat and magma banks</option>
+        <option value="temple">Slime Temple - a stepped temple, watch towers and slime pits</option>
+        <option value="soulvalley">Soul Valley - soul sand that slows you, magma veins that burn</option>
+        <option value="canyon">Waterfall Canyon - two cliffs, a river gorge and bridges</option>
       </select>
       <p class="sub">Only applies when you're the only player - otherwise use /arena in chat.</p>
       <label>Tipped arrows</label>

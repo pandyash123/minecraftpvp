@@ -122,6 +122,11 @@
       MC.WEB[getBlock(Math.floor(x), Math.floor(y + PHYS.HEIGHT - 0.05), Math.floor(z))] === 1;
   }
 
+  /** Block id directly under the entity's feet. */
+  function blockUnder(getBlock, e) {
+    return getBlock(Math.floor(e.x), Math.floor(e.y - 0.05), Math.floor(e.z));
+  }
+
   /*
    * One integration step of the standard walk/jump/swim controller.
    * `input` = {forward,strafe,jump,sneak,sprint,yaw}
@@ -133,6 +138,12 @@
     if (input.block) speed *= PHYS.BLOCK_SPEED;
     if (water) speed *= 0.62;
     if (web) speed *= PHYS.WEB_SPEED;
+    // Special arena blocks (see MC.BLOCKS): soul sand drags you down to a
+    // crawl, ice lets you build up a bit more speed but barely any grip.
+    var under = e.onGround ? blockUnder(getBlock, e) : 0;
+    var onIce = MC.SLIPPERY[under] === 1;
+    if (MC.SLOW[under] === 1) speed *= 0.45;
+    if (onIce) speed *= 1.25;
     // Speed/Slowness potions (client-only for now - see game.js) scale the
     // target speed itself, same as vanilla.
     if (input.speedMult) speed *= input.speedMult;
@@ -147,6 +158,7 @@
     var accel = e.onGround ? PHYS.FRICTION_GROUND : PHYS.FRICTION_GROUND * PHYS.AIR_CONTROL;
     if (water) accel *= 0.7;
     if (web) accel *= 0.5;
+    if (onIce) accel *= 0.12;
     // A burst dash (spear Lunge) is a brief window of pure momentum, not
     // ground movement - the ordinary blend-toward-wish-speed above pulls
     // horizontal velocity toward whatever WASD currently asks for every
@@ -206,7 +218,14 @@
     }
     if (e.vy < -PHYS.TERMINAL) e.vy = -PHYS.TERMINAL;
 
+    var fallSpeed = e.vy;
     move(getBlock, e, e.vx * dt, e.vy * dt, e.vz * dt, {});
+    // Slime: a hard landing bounces you most of the way back up (sneak to
+    // stick the landing instead). Fall damage is cancelled server-side.
+    if (e.onGround && fallSpeed < -4 && !input.sneak && MC.BOUNCY[blockUnder(getBlock, e)] === 1) {
+      e.vy = -fallSpeed * 0.8;
+      e.onGround = false;
+    }
     return e;
   }
 
@@ -217,6 +236,7 @@
     boxHitsWorld: boxHitsWorld,
     inWater: inWater,
     headInWater: headInWater,
-    inWeb: inWeb
+    inWeb: inWeb,
+    blockUnder: blockUnder
   };
 });

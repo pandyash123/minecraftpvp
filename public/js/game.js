@@ -12,7 +12,8 @@
     strength: 'Strength', speed: 'Speed', slowness: 'Slowness', resistance: 'Resistance',
     fireResistance: 'Fire Resistance', regeneration: 'Regeneration',
     // Tipped-arrow effects (see MC.ARROW_TIPS).
-    poison: 'Poison', wither: 'Wither', weakness: 'Weakness', slowFalling: 'Slow Falling'
+    poison: 'Poison', wither: 'Wither', weakness: 'Weakness', slowFalling: 'Slow Falling',
+    invisibility: 'Invisibility'
   };
   const ROMAN = ['', 'I', 'II', 'III', 'IV', 'V', 'VI'];
   // Which potion's icon represents each active-effect kind in the HUD -
@@ -53,6 +54,11 @@
         trimMirrorCheck: el('trimMirrorCheck'), trimMirrorLabel: el('trimMirrorLabel'),
         shopBtn: el('shopBtn'), coinCount: el('coinCount'), shopPanel: el('shopPanel'),
         shopCoins: el('shopCoins'), shopList: el('shopList'), shopCloseBtn: el('shopCloseBtn'),
+        duelBtn: el('duelBtn'), duelPanel: el('duelPanel'), duelTarget: el('duelTarget'), duelBotOpts: el('duelBotOpts'),
+        duelBotDiff: el('duelBotDiff'), duelBotHacks: el('duelBotHacks'), duelKit: el('duelKit'),
+        duelSendBtn: el('duelSendBtn'), duelCloseBtn: el('duelCloseBtn'), duelInvite: el('duelInvite'),
+        duelInviteText: el('duelInviteText'), duelInviteKit: el('duelInviteKit'), duelAcceptBtn: el('duelAcceptBtn'),
+        duelDeclineBtn: el('duelDeclineBtn'), duelBanner: el('duelBanner'),
         trimBrushRow: el('trimBrushRow'), trimClearBtn: el('trimClearBtn'), trimExportBtn: el('trimExportBtn'),
         trimImportBtn: el('trimImportBtn'), trimImportInput: el('trimImportInput'), trimCloseBtn: el('trimCloseBtn')
       };
@@ -152,6 +158,27 @@
       this._buildCustomItemsMenu();
       this._buildEnchantMenu();
       this._wireTrimEditor();
+      if (this.hud.kitSelect) this.hud.kitSelect.addEventListener('change', () => this._syncKitLocks());
+      this._syncKitLocks();
+    }
+
+    /** A preset kit locks items, enchantments, armor/weapon tiers and the
+     * arrow tip - grey out every menu option it overrides so it's obvious
+     * they don't apply (the server ignores them either way). */
+    _syncKitLocks() {
+      const kit = MC.KITS[this.hud.kitSelect && this.hud.kitSelect.value];
+      const locked = !!(kit && kit.preset);
+      const controls = [this.hud.customLoadoutCheck, this.hud.netheriteArmorCheck, this.hud.netheriteSwordCheck,
+        this.hud.netheriteAxeCheck, this.hud.arrowTipSelect];
+      if (this.hud.enchantList) controls.push(...this.hud.enchantList.querySelectorAll('input[type=checkbox]'));
+      for (const c of controls) {
+        if (!c) continue;
+        c.disabled = locked;
+        const row = c.closest('label') || c;
+        row.style.opacity = locked ? '0.45' : '';
+      }
+      if (this.hud.customItemsList && locked) this.hud.customItemsList.classList.add('hidden');
+      else if (this.hud.customItemsList && this.hud.customLoadoutCheck) this.hud.customItemsList.classList.toggle('hidden', !this.hud.customLoadoutCheck.checked);
     }
 
     /**
@@ -215,6 +242,152 @@
       }
     }
 
+    // -------------------------------------------------------------- duels --
+    /** Fills a <select> with every kit, `selected` pre-picked. */
+    _fillKitSelect(select, selected) {
+      select.innerHTML = '';
+      for (const key in MC.KITS) {
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = MC.KITS[key].name;
+        if (key === selected) opt.selected = true;
+        select.appendChild(opt);
+      }
+    }
+
+    _toggleDuel() {
+      if (!this.me || this.inDuel) return;
+      this.duelOpen = !this.duelOpen;
+      this.hud.duelPanel.classList.toggle('hidden', !this.duelOpen);
+      if (this.duelOpen) {
+        this._renderDuelPanel();
+        document.exitPointerLock && document.exitPointerLock();
+      } else {
+        this._requestPointerLock();
+      }
+    }
+
+    /** Opponent list: every real player here right now, plus a bot. */
+    _renderDuelPanel() {
+      const sel = this.hud.duelTarget;
+      const keep = sel.value;
+      sel.innerHTML = '';
+      for (const r of this.remote.values()) {
+        if (r.bot || r.dummy) continue;
+        const opt = document.createElement('option');
+        opt.value = r.id;
+        opt.textContent = r.name;
+        sel.appendChild(opt);
+      }
+      const bot = document.createElement('option');
+      bot.value = '__bot';
+      bot.textContent = 'A bot';
+      sel.appendChild(bot);
+      if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+      this.hud.duelBotOpts.classList.toggle('hidden', sel.value !== '__bot');
+      if (!this.hud.duelKit.options.length) this._fillKitSelect(this.hud.duelKit, this.kit);
+    }
+
+    _sendDuelRequest() {
+      const target = this.hud.duelTarget.value;
+      const kit = this.hud.duelKit.value;
+      if (!target) return;
+      if (target === '__bot') {
+        this.net.duelRequest({ kit, bot: { difficulty: this.hud.duelBotDiff.value, hacks: this.hud.duelBotHacks.checked } });
+      } else {
+        this.net.duelRequest({ target, kit });
+      }
+      global.MCSound.click();
+      this._toggleDuel();
+    }
+
+    /** Someone challenged us: a small toast we can answer mid-fight. */
+    _showDuelInvite(d) {
+      this._pendingInvite = d;
+      this.hud.duelInviteText.textContent = d.fromName + ' challenges you to a duel (' + MC.KITS[d.kit].name + ')';
+      this._fillKitSelect(this.hud.duelInviteKit, d.kit);
+      this.hud.duelInvite.classList.remove('hidden');
+      clearTimeout(this._inviteTimer);
+      this._inviteTimer = setTimeout(() => this._answerDuelInvite(false), 30000);
+      global.MCSound.click();
+    }
+
+    _answerDuelInvite(accept) {
+      const d = this._pendingInvite;
+      this._pendingInvite = null;
+      clearTimeout(this._inviteTimer);
+      this.hud.duelInvite.classList.add('hidden');
+      if (!d) return;
+      this.net.duelAnswer({ reqId: d.reqId, accept, kit: this.hud.duelInviteKit.value });
+    }
+
+    /** Big centred text: a title line and an optional smaller one. */
+    _showDuelBanner(title, sub, ms) {
+      const b = this.hud.duelBanner;
+      b.textContent = title;
+      if (sub) {
+        const small = document.createElement('small');
+        small.textContent = sub;
+        b.appendChild(small);
+      }
+      b.classList.remove('hidden');
+      clearTimeout(this._bannerTimer);
+      this._bannerTimer = setTimeout(() => b.classList.add('hidden'), ms || 3000);
+    }
+
+    /**
+     * Leaves the current game and joins another one on the same page: a
+     * private duel room (`ns` set; the duel's kit, loadout and enchants are
+     * locked) or, with no `ns`, back to the main arena with the loadout
+     * picked at the menu.
+     */
+    async _switchRoom(ns, kit) {
+      if (this._switching || !this._startArgs) return;
+      this._switching = true;
+      const a = this._startArgs;
+      this._endSession();
+      this.hud.loading.classList.remove('hidden');
+      let args;
+      if (ns) {
+        const gear = MC.kitGear(kit, this._menuGear, false);
+        args = [a[0], kit, null, MC.defaultEnchantOpts(), gear.armor, gear.swordTier, gear.axeTier, a[7], a[8], a[9], gear.arrowTip, { ns }];
+      } else {
+        args = a.concat([{}]);
+      }
+      try {
+        await this.start(...args);
+        this._switching = false;
+      } catch (err) {
+        console.error(err);
+        this._switching = false;
+        if (ns) { this._switchRoom(null); return; }
+        this.hud.loading.classList.add('hidden');
+        this.hud.menu.classList.remove('hidden');
+        alert('Failed to rejoin: ' + err.message);
+      }
+    }
+
+    /** True if item `key` already sits somewhere in the hotbar/backpack. */
+    _inLoadout(key) {
+      const idx = ITEMS.findIndex(i => i.key === key);
+      return idx !== -1 && (this.hotbarSlots.includes(idx) || this.backpackSlots.includes(idx));
+    }
+
+    /** Puts item `key` into the first open hotbar slot (else the backpack)
+     * without a rejoin, and rebuilds whatever UI shows the loadout. */
+    _addToLoadout(key) {
+      const idx = ITEMS.findIndex(i => i.key === key);
+      if (idx === -1 || this._inLoadout(key)) return;
+      const hbPos = this.hotbarSlots.indexOf(null);
+      if (hbPos !== -1) this.hotbarSlots[hbPos] = idx;
+      else {
+        const bpPos = this.backpackSlots.indexOf(null);
+        if (bpPos !== -1) this.backpackSlots[bpPos] = idx;
+      }
+      this._buildHotbar();
+      if (this.inventoryOpen) this._buildInventoryUI();
+    }
+
     _renderShop() {
       const coins = (this.shop && this.shop.coins) | 0;
       if (this.hud.coinCount) this.hud.coinCount.textContent = coins;
@@ -222,6 +395,10 @@
       this.hud.shopCoins.textContent = coins;
       const levels = (this.shop && this.shop.upgrades) || {};
       this.hud.shopList.innerHTML = '';
+      const upHeader = document.createElement('div');
+      upHeader.className = 'shopHeader';
+      upHeader.textContent = 'Upgrades';
+      this.hud.shopList.appendChild(upHeader);
       for (const key of MC.SHOP_KEYS) {
         const up = MC.SHOP.UPGRADES[key];
         const level = levels[key] | 0;
@@ -255,6 +432,44 @@
         buy.textContent = maxed ? 'Maxed' : cost + ' coins';
         buy.disabled = maxed || coins < cost;
         buy.addEventListener('click', () => { this.net.shopBuy(key); global.MCSound.click(); });
+
+        row.appendChild(info); row.appendChild(buy);
+        this.hud.shopList.appendChild(row);
+      }
+
+      // Item bundles (MC.SHOP.ITEMS) - one click buys one bundle, as often
+      // as you can afford it. Weapons are a single unlock.
+      const header = document.createElement('div');
+      header.className = 'shopHeader';
+      header.textContent = 'Items';
+      this.hud.shopList.appendChild(header);
+      for (const offer of MC.SHOP.ITEMS) {
+        const item = ITEMS.find(i => i.key === offer.item);
+        if (!item) continue;
+        const owned = this._inLoadout(offer.item);
+        const done = !offer.amount && owned;
+
+        const row = document.createElement('div');
+        row.className = 'shopItem' + (done ? ' maxed' : '');
+        const info = document.createElement('div');
+        info.className = 'shopInfo';
+        const name = document.createElement('div');
+        name.className = 'shopName';
+        name.textContent = (offer.name || item.name) + (offer.amount ? '  x' + offer.amount : '');
+        const desc = document.createElement('div');
+        desc.className = 'shopDesc';
+        const pouch = offer.ammo || offer.item;
+        desc.textContent = done ? 'Unlocked'
+          : !owned ? 'Adds it to your loadout for this session'
+          : offer.amount ? 'You have ' + ((this.ammo && this.ammo[pouch]) | 0) : '';
+        info.appendChild(name); info.appendChild(desc);
+
+        const buy = document.createElement('button');
+        buy.type = 'button';
+        buy.className = 'shopBuy';
+        buy.textContent = done ? 'Owned' : offer.cost + ' coins';
+        buy.disabled = done || coins < offer.cost;
+        buy.addEventListener('click', () => { this.net.shopBuyItem(offer.key); global.MCSound.click(); });
 
         row.appendChild(info); row.appendChild(buy);
         this.hud.shopList.appendChild(row);
@@ -651,7 +866,7 @@
         // tier swap on the regular sword/axe (see the checkboxes right
         // below this list), always exactly one of each in a loadout.
         if (item.key === 'netherite_sword' || item.key === 'netherite_axe') continue;
-        // Elytra is locked behind the secret '/elytra257' chat command, not
+        // Elytra is locked behind the admin-only '/elytra' command, not
         // a normal loadout pick - see net.on('elytraUnlocked', ...) below.
         if (item.key === 'elytra') continue;
         const label = document.createElement('label');
@@ -709,8 +924,10 @@
       const kit = this.hud.kitSelect ? this.hud.kitSelect.value : 'web';
       localStorage.setItem('mc_kit', kit);
       this.selfName = name;
-      const customItems = this._customItemsFromMenu();
-      const enchantOpts = this._enchantOptsFromMenu();
+      // A preset kit locks the loadout and enchantments (see _syncKitLocks).
+      const presetKit = !!(MC.KITS[kit] && MC.KITS[kit].preset);
+      const customItems = presetKit ? null : this._customItemsFromMenu();
+      const enchantOpts = presetKit ? MC.defaultEnchantOpts() : this._enchantOptsFromMenu();
       const armor = this.hud.netheriteArmorCheck && this.hud.netheriteArmorCheck.checked ? 'netherite' : 'diamond';
       const swordTier = this.hud.netheriteSwordCheck && this.hud.netheriteSwordCheck.checked ? 'netherite' : 'diamond';
       const axeTier = this.hud.netheriteAxeCheck && this.hud.netheriteAxeCheck.checked ? 'netherite' : 'diamond';
@@ -724,10 +941,18 @@
       localStorage.setItem('mc_arena', arena);
       const arrowTip = this.hud.arrowTipSelect ? this.hud.arrowTipSelect.value : 'none';
       localStorage.setItem('mc_arrowTip', arrowTip);
+      // A preset kit decides its own armor/sword/axe/arrow tip, whatever the
+      // menu says - the server applies the same MC.kitGear() rule, this just
+      // keeps our own hotbar and armor icons in step with it.
+      const gear = MC.kitGear(kit, { armor, swordTier, axeTier, arrowTip }, !!(customItems && customItems.length));
+      // Kept for hopping into a duel and back (see _switchRoom): the raw menu
+      // choices, since a duel's kit may resolve them differently.
+      this._menuGear = { armor, swordTier, axeTier, arrowTip };
+      this._startArgs = [name, kit, customItems, enchantOpts, gear.armor, gear.swordTier, gear.axeTier, dogArmor, trims, arena, gear.arrowTip];
       this.hud.menu.classList.add('hidden');
       this.hud.loading.classList.remove('hidden');
       global.MCSound.resume();
-      this.start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena, arrowTip).catch(err => {
+      this.start(name, kit, customItems, enchantOpts, gear.armor, gear.swordTier, gear.axeTier, dogArmor, trims, arena, gear.arrowTip).catch(err => {
         console.error(err);
         this.hud.loading.classList.add('hidden');
         this.hud.menu.classList.remove('hidden');
@@ -735,12 +960,15 @@
       });
     }
 
-    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena, arrowTip) {
+    /** `room` is only set when switching into a duel room or back out of
+     * one (see _switchRoom): { ns } for the room to join, or {} to rejoin
+     * the main arena without replaying the menu's bot/dummy setup. */
+    async start(name, kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, trims, arena, arrowTip, room) {
       // Drives the armor-piece icon color in the inventory (see
       // _buildInventoryUI/_renderChestSlot) - the human player's own tier
       // isn't part of `this.me` (only remote players carry .armor, from
       // publicPlayer()), so it's tracked here instead.
-      this.armorTier = armor === 'netherite' ? 'netherite' : 'diamond';
+      this.armorTier = MC.ARMOR_TIERS[armor] ? armor : 'diamond';
       // Same idea as armorTier above - our own trims aren't part of
       // `this.me` either, so they're tracked here for the third-person
       // self-render and the shield viewmodel (see render()/_drawViewmodel()).
@@ -751,7 +979,9 @@
       // speed) - combat-relevant enchants are already re-validated server-side
       // regardless of what this holds.
       this.myEnchants = enchantOpts || MC.defaultEnchantOpts();
-      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, this.myTrims, arena, arrowTip);
+      const init = await this.net.connect(name, this.kit, customItems, enchantOpts, armor, swordTier, axeTier, dogArmor, this.myTrims, arena, arrowTip, room && room.ns);
+      this.inDuel = !!(room && room.ns);
+      this.hud.duelBtn.classList.toggle('hidden', this.inDuel);
       this.world = new global.MCWorld(init.seed, init.arena);
       this.world.applyEdits(init.edits || []);
       // The WebGL context (and everything already uploaded into it - block
@@ -816,6 +1046,22 @@
       }
       await this._buildInitialMeshes();
 
+      // The menu's bot/dummy setup only runs on a fresh join from the menu -
+      // not in a duel (commands are off there) or when coming back from one.
+      if (!room) this._applyMenuSetup();
+
+      this.hud.loading.classList.add('hidden');
+      this._buildHotbar();
+      this._buildOffhandHUD();
+      this._updateHealthUI();
+      this._buildInventoryUI();
+      this._log(this.inDuel ? 'Duel on! Good luck.' : 'Welcome, ' + name + '. WASD to move, mouse to look, click to lock pointer.');
+      this.lastFrameTime = performance.now();
+      this._running = true;
+      this._rafId = requestAnimationFrame(this._frame);
+    }
+
+    _applyMenuSetup() {
       const requestedBots = parseInt(this.hud.botsInput.value, 10);
       const difficulty = this.hud.difficultySelect ? this.hud.difficultySelect.value : 'normal';
       const botArmor = this.hud.armorSelect ? this.hud.armorSelect.value : 'diamond';
@@ -829,21 +1075,18 @@
         this.net.chat('/dummy 1 ' + (wantShield ? 'shield' : 'noshield'));
       }
       if (this.hud.atkDummyCheck && this.hud.atkDummyCheck.checked) this.net.chat('/atkdummy 1');
-
-      this.hud.loading.classList.add('hidden');
-      this._buildHotbar();
-      this._buildOffhandHUD();
-      this._updateHealthUI();
-      this._buildInventoryUI();
-      this._log('Welcome, ' + name + '. WASD to move, mouse to look, click to lock pointer.');
-      this.lastFrameTime = performance.now();
-      this._running = true;
-      this._rafId = requestAnimationFrame(this._frame);
     }
 
     /** Tears the current session down and returns to the pre-join menu,
      * leaving the renderer/GL context alive so Play can be clicked again. */
     _leaveToMenu() {
+      this._endSession();
+      this.hud.menu.classList.remove('hidden');
+    }
+
+    /** Stops the running session and clears its state, ready for start() to
+     * be called again - from the menu, or when switching rooms for a duel. */
+    _endSession() {
       this._running = false;
       if (this._rafId) cancelAnimationFrame(this._rafId);
       clearInterval(this._respawnInt);
@@ -884,7 +1127,9 @@
 
       this.me = null;
       this.world = null;
-      this.hud.menu.classList.remove('hidden');
+      if (this.shopOpen) { this.shopOpen = false; this.hud.shopPanel.classList.add('hidden'); }
+      if (this.duelOpen) { this.duelOpen = false; this.hud.duelPanel.classList.add('hidden'); }
+      this.hud.duelInvite.classList.add('hidden');
     }
 
     async _buildInitialMeshes() {
@@ -1004,6 +1249,7 @@
       });
       net.on('heal', d => {
         this.me.health = d.health; this.me.absorption = d.absorption;
+        if (d.maxHealth) this.me.maxHealth = d.maxHealth;
         if (d.ammo) this.ammo = d.ammo;
         // A totem save consumes the one in the offhand - once its ammo runs
         // out there's nothing left to hold there, so fall back to the shield.
@@ -1011,7 +1257,7 @@
         this._updateHealthUI(); this._updateAmmoUI();
       });
       net.on('killreward', d => { this.me.health = d.health; this.ammo = d.ammo; this._updateHealthUI(); this._updateAmmoUI(); global.MCSound.kill(); });
-      net.on('ammo', d => { this.ammo = d; this._updateAmmoUI(); });
+      net.on('ammo', d => { this.ammo = d; this._updateAmmoUI(); this._renderShop(); });
       net.on('effects', d => this._applyEffectsSnapshot(d));
       net.on('hp', d => {
         if (d.id === this.me.id) { this.me.health = d.health; this.me.absorption = d.absorption; this._updateHealthUI(); }
@@ -1026,23 +1272,25 @@
       net.on('swing', d => { const r = this.remote.get(d.id); if (r) { r.swingT = 0.001; } });
       net.on('effect', d => this._spawnEffect(d));
       net.on('weather', d => { this.weather = d.kind; });
-      // Secret '/elytra257' unlock landed - add it to the loadout live
+      // Admin '/elytra' unlock landed - add it to the loadout live
       // (first open hotbar slot, else backpack) instead of requiring a
       // rejoin, and rebuild whatever UI shows the loadout.
-      net.on('elytraUnlocked', () => {
-        const elytraIdx = ITEMS.findIndex(i => i.key === 'elytra');
-        if (elytraIdx === -1) return;
-        if (this.hotbarSlots.includes(elytraIdx) || this.backpackSlots.includes(elytraIdx)) return;
-        let placed = false;
-        const hbPos = this.hotbarSlots.indexOf(null);
-        if (hbPos !== -1) { this.hotbarSlots[hbPos] = elytraIdx; placed = true; }
-        if (!placed) {
-          const bpPos = this.backpackSlots.indexOf(null);
-          if (bpPos !== -1) { this.backpackSlots[bpPos] = elytraIdx; placed = true; }
-        }
-        this._buildHotbar();
-        if (this.inventoryOpen) this._buildInventoryUI();
+      net.on('elytraUnlocked', () => this._addToLoadout('elytra'));
+      // Duels - see _switchRoom and the server's duel section.
+      net.on('duelInvite', d => this._showDuelInvite(d));
+      net.on('duelStart', d => {
+        this._showDuelBanner('Duel vs ' + d.opponent, MC.KITS[d.kit].name + ' kit', 3000);
+        this._switchRoom(d.ns, d.kit);
       });
+      net.on('duelEnd', d => {
+        const won = this.me && d.winner === this.me.name && d.loser !== this.me.name;
+        this.hud.deathScreen.classList.add('hidden');
+        this._showDuelBanner(won ? 'Victory!' : 'Defeat', (d.winner || '?') + ' beat ' + (d.loser || '?') + ' - back to the arena in a moment', 4500);
+      });
+      net.on('duelReturn', () => this._switchRoom(null));
+      // Same thing for an item bought from the shop that wasn't in the
+      // loadout yet.
+      net.on('itemUnlocked', d => { this._addToLoadout(d.key); this._renderShop(); });
       net.on('death', d => {
         if (d.victim === this.me.id) this._onSelfDeath(d);
         else { const r = this.remote.get(d.victim); if (r) r.alive = false; }
@@ -1111,12 +1359,17 @@
     _applySnapshot(s) {
       const now = performance.now();
       for (const row of s.p) {
-        const [id, x, y, z, yaw, pitch, health, alive, slot, absorption, flags, vx, vz] = row;
-        if (id === this.me.id) { this.me.burning = !!(flags & 8); continue; }
+        const [id, x, y, z, yaw, pitch, health, alive, slot, absorption, flags, vx, vz, maxHealth] = row;
+        if (id === this.me.id) {
+          this.me.burning = !!(flags & 8);
+          // An admin's /maxhealth can change our own cap at any time.
+          if (maxHealth && maxHealth !== this.me.maxHealth) { this.me.maxHealth = maxHealth; this._updateHealthUI(); }
+          continue;
+        }
         const isDummy = String(id).startsWith('dummy') || String(id).startsWith('atkdummy');
         const r = this._ensureRemote({ id, name: id, x, y, z, yaw, pitch, health, alive, slot, bot: String(id).startsWith('bot') || isDummy, dummy: isDummy });
         r.tx = x; r.ty = y; r.tz = z; r.tyaw = yaw; r.tpitch = pitch;
-        r.health = health; r.alive = !!alive; r.slot = slot; r.absorption = absorption || 0;
+        r.health = health; r.maxHealth = maxHealth || C.MAX_HEALTH; r.alive = !!alive; r.slot = slot; r.absorption = absorption || 0;
         r.sneak = !!(flags & 1); r.sprint = !!(flags & 2); r.blocking = !!(flags & 4); r.burning = !!(flags & 8); r.hasEffect = !!(flags & 16); r.gliding = !!(flags & 32); r.invisible = !!(flags & 64);
         r.vx = vx; r.vz = vz;
         r.snapT = now;
@@ -1174,8 +1427,10 @@
         // Same three-way camera cycle as vanilla Minecraft's F5 - block the
         // browser's own "refresh page" default or every press would reload.
         if (e.code === 'F5') { e.preventDefault(); this._cyclePerspective(); return; }
-        if (e.code === 'KeyB') { e.preventDefault(); this._toggleShop(); return; }
+        if (e.code === 'KeyB' && !this.duelOpen) { e.preventDefault(); this._toggleShop(); return; }
         if (this.shopOpen) { if (e.code === 'Escape') this._toggleShop(); return; }
+        if (e.code === 'KeyG' && !this.inDuel) { e.preventDefault(); this._toggleDuel(); return; }
+        if (this.duelOpen) { if (e.code === 'Escape') this._toggleDuel(); return; }
         if (this.inventoryOpen) {
           if (e.code === 'Escape') this._toggleInventory();
           return; // swallow movement/hotbar keys while browsing the inventory
@@ -1218,7 +1473,7 @@
         // Losing pointer lock mid-game (Escape, alt-tab, focus loss) pauses -
         // but not on the very first click-to-start, and not while dead or
         // browsing the inventory, which already have their own overlays.
-        if (!this.pointerLocked && this._hasEverLocked && this.me && this.me.alive && !this.inventoryOpen) {
+        if (!this.pointerLocked && this._hasEverLocked && this.me && this.me.alive && !this.inventoryOpen && !this.shopOpen && !this.duelOpen) {
           this.hud.pauseMenu.classList.remove('hidden');
         }
       });
@@ -1226,6 +1481,12 @@
       this.hud.leaveBtn.addEventListener('click', () => this._leaveToMenu());
       this.hud.viewModeBtn.addEventListener('click', () => this._cyclePerspective());
       this.hud.shopBtn.addEventListener('click', () => this._toggleShop());
+      this.hud.duelBtn.addEventListener('click', () => this._toggleDuel());
+      this.hud.duelCloseBtn.addEventListener('click', () => this._toggleDuel());
+      this.hud.duelSendBtn.addEventListener('click', () => this._sendDuelRequest());
+      this.hud.duelTarget.addEventListener('change', () => this.hud.duelBotOpts.classList.toggle('hidden', this.hud.duelTarget.value !== '__bot'));
+      this.hud.duelAcceptBtn.addEventListener('click', () => this._answerDuelInvite(true));
+      this.hud.duelDeclineBtn.addEventListener('click', () => this._answerDuelInvite(false));
       this.hud.shopCloseBtn.addEventListener('click', () => this._toggleShop());
       document.addEventListener('mousemove', e => {
         if (!this.pointerLocked) return;
@@ -1618,7 +1879,7 @@
       }
       // A sword hit against a charged respawn anchor detonates it early -
       // same forgiving block targeting as the crystal above.
-      if (item.key === 'sword' || item.key === 'netherite_sword') {
+      if (item.key === 'sword' || item.key === 'netherite_sword' || item.key === 'iron_sword') {
         const exactAnchor = (pick && pick.type === 'block' && pick.block.block === ID.RESPAWN_ANCHOR && pick.dist <= C.REACH_ATTACK) ? pick.block : null;
         const anchor = exactAnchor || this._findNearbyBlock(ID.RESPAWN_ANCHOR, C.REACH_ATTACK);
         if (anchor) {
@@ -2158,7 +2419,7 @@
       // you keep falling/sliding, same as vanilla Minecraft.
       // Browsing the shop suspends movement input the same way the
       // inventory does - physics keeps running, you just stop steering.
-      const inv = this.inventoryOpen || this.shopOpen;
+      const inv = this.inventoryOpen || this.shopOpen || this.duelOpen;
       // A spear Lunge is a burst of velocity way above normal walk/sprint
       // speed - the ground-movement model in shared/physics.js pulls
       // horizontal velocity toward whatever WASD currently asks for every
@@ -2780,7 +3041,7 @@
 
     _updateHealthUI() {
       const health = Math.max(0, this.me.health);
-      const redCount = Math.ceil(C.MAX_HEALTH / 2);
+      const redCount = Math.ceil((this.me.maxHealth || C.MAX_HEALTH) / 2);
       const goldCount = Math.ceil((this.me.absorption || 0) / 2);
       const frag = document.createDocumentFragment();
       for (let i = 0; i < redCount; i++) {
@@ -2996,11 +3257,11 @@
       }
       const node = entry.node;
       entry.nameEl.textContent = p.name + (p.dummy ? ' [DUMMY]' : (p.bot ? ' [BOT]' : ''));
-      const pct = clamp((p.health || 0) / C.MAX_HEALTH, 0, 1);
+      const pct = clamp((p.health || 0) / (p.maxHealth || C.MAX_HEALTH), 0, 1);
       entry.bar.style.width = Math.round(pct * 100) + '%';
       entry.bar.style.background = pct > 0.5 ? '#4caf50' : pct > 0.25 ? '#e0a72a' : '#e0432a';
       if (entry.absorb) {
-        const abs = clamp((p.absorption || 0) / C.MAX_HEALTH, 0, 1);
+        const abs = clamp((p.absorption || 0) / (p.maxHealth || C.MAX_HEALTH), 0, 1);
         entry.absorb.style.width = Math.round(abs * 100) + '%';
         entry.absorb.style.left = Math.round(pct * 100) + '%';
       }
@@ -3193,7 +3454,7 @@
   }
   function deathVerbFor(cause) {
     return cause === 'fall' ? 'fell to their death' : cause === 'void' ? 'fell into the void' : cause === 'suicide' ? 'gave up' :
-      cause === 'lava' ? 'burned to a crisp' : cause === 'tnt' ? 'blew up' : 'died';
+      cause === 'lava' ? 'burned to a crisp' : cause === 'magma' ? 'discovered the floor was lava' : cause === 'tnt' ? 'blew up' : 'died';
   }
   function ammoLabel(slot, ammo) {
     const item = ITEMS[slot];

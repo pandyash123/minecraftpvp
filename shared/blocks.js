@@ -9,9 +9,9 @@
   'use strict';
 
   var WORLD = {
-    SX: 64,
-    SY: 48,
-    SZ: 64,
+    SX: 96,
+    SY: 56,
+    SZ: 96,
     SEA: 1, // effectively unused: the arena has no ocean
     CHUNK: 16 // horizontal chunk size; chunks are full height
   };
@@ -48,9 +48,13 @@
     END_CRYSTAL: 26,
     RESPAWN_ANCHOR: 27,
     GLOWSTONE: 28,
-    CRACKS: 29 // 29..38 = break stages 0..9
+    SLIME: 29,
+    SOUL_SAND: 30,
+    MAGMA: 31,
+    ICE: 32,
+    CRACKS: 33 // 33..42 = break stages 0..9
   };
-  T.TILE_COUNT = 39;
+  T.TILE_COUNT = 43;
 
   var ID = {
     AIR: 0,
@@ -80,7 +84,11 @@
     POWDER_SNOW: 24,
     END_CRYSTAL: 25,
     RESPAWN_ANCHOR: 26,
-    GLOWSTONE: 27
+    GLOWSTONE: 27,
+    SLIME: 28,
+    SOUL_SAND: 29,
+    MAGMA: 30,
+    ICE: 31
   };
 
   // solid   -> blocks player movement
@@ -140,7 +148,19 @@
     { name: 'Respawn Anchor', all: T.RESPAWN_ANCHOR, hardness: 3, pick: true },
     // A plain light-emitting decorative block - also what charges a
     // respawn anchor (right-click one instead of placing normally).
-    { name: 'Glowstone', all: T.GLOWSTONE, hardness: 0.3 }
+    { name: 'Glowstone', all: T.GLOWSTONE, hardness: 0.3 },
+    // Arena-only special blocks (see worldgen.js). Their effects live in
+    // shared/physics.js (movement) and server.js (fall damage, burning).
+    // Slime: landing on it bounces you back up and cancels fall damage -
+    // hold sneak to land without bouncing.
+    { name: 'Slime Block', all: T.SLIME, hardness: 0, bouncy: true },
+    // Soul Sand: drags anyone walking on it down to a crawl.
+    { name: 'Soul Sand', all: T.SOUL_SAND, hardness: 0.5, slow: true },
+    // Magma Block: burns anyone standing on it unless they sneak or have
+    // Fire Resistance.
+    { name: 'Magma Block', all: T.MAGMA, hardness: 0.5, pick: true, magma: true },
+    // Ice: slippery - hard to start moving and harder to stop.
+    { name: 'Ice', all: T.ICE, hardness: 0.5, slippery: true }
   ];
 
   var N = BLOCKS.length;
@@ -149,6 +169,7 @@
   var LIQUID = new Uint8Array(N);
   var WEB = new Uint8Array(N);
   var POWDER_SNOW = new Uint8Array(N);
+  var BOUNCY = new Uint8Array(N), SLOW = new Uint8Array(N), MAGMA = new Uint8Array(N), SLIPPERY = new Uint8Array(N);
   var HARDNESS = new Float32Array(N);
   var PICKABLE = new Uint8Array(N);
   // per-face tile: order +X, -X, +Y, -Y, +Z, -Z
@@ -162,6 +183,10 @@
     LIQUID[i] = b.liquid ? 1 : 0;
     WEB[i] = b.web ? 1 : 0;
     POWDER_SNOW[i] = b.powderSnow ? 1 : 0;
+    BOUNCY[i] = b.bouncy ? 1 : 0;
+    SLOW[i] = b.slow ? 1 : 0;
+    MAGMA[i] = b.magma ? 1 : 0;
+    SLIPPERY[i] = b.slippery ? 1 : 0;
     HARDNESS[i] = b.hardness === undefined ? 1 : b.hardness;
     PICKABLE[i] = b.pick ? 1 : 0;
     var top = b.top !== undefined ? b.top : b.all;
@@ -335,7 +360,13 @@
     { key: 'respawn_anchor', name: 'Respawn Anchor', type: 'block', block: ID.RESPAWN_ANCHOR, mineSpeed: 0.3 },
     // Right-click a respawn anchor within reach to charge it instead of
     // placing normally - otherwise just a plain light-emitting block.
-    { key: 'glowstone', name: 'Glowstone', type: 'block', block: ID.GLOWSTONE, mineSpeed: 0.3 }
+    { key: 'glowstone', name: 'Glowstone', type: 'block', block: ID.GLOWSTONE, mineSpeed: 0.3 },
+    // Only in the Wind Charge Archer preset kit - a step below the diamond
+    // sword. Counts as a sword for enchants/blocking (see baseWeaponKey).
+    { key: 'iron_sword', name: 'Iron Sword', type: 'weapon', damage: 6, cooldown: 0.42, knockback: 1.0, mineSpeed: 0.4 },
+    // Plain food: no hunger bar in this game, so it just heals outright -
+    // weaker than a gapple (no absorption/regen) but you carry a stack.
+    { key: 'beef', name: 'Cooked Beef', type: 'food', heal: 6, absorb: 0, eatTime: 1.6, ammo: 64, mineSpeed: 0.3 }
   ];
   for (var k = 0; k < ITEMS.length; k++) ITEMS[k].slot = k;
 
@@ -360,10 +391,90 @@
       // set at join), not separate items you'd pick alongside them. Only
       // ever one sword and one axe in a loadout at a time. elytra is ALSO
       // deliberately not listed here (or in any kit) - it's locked behind
-      // the secret '/elytra257' chat command instead (see
-      // server.js's playerHasItem() and the 'elytraUnlocked' client event).
+      // the admin-only '/elytra' command instead (see server.js's
+      // playerHasItem() and the 'elytraUnlocked' client event) - the Mace /
+      // Rocket preset below is the one kit that hands it out.
+    },
+
+    // Preset kits: a fixed loadout that ALSO fixes the gear the menu would
+    // otherwise let you pick - armor tier, sword/axe tier and (where the
+    // kit has tipped arrows) the arrow tip. See kitGear(). Item counts are
+    // the same as every other kit (freshAmmo). The shield is always in the
+    // offhand, so it isn't listed. Players only - bots stick to the three
+    // kits above (BASE_KIT_KEYS).
+    crystal: {
+      key: 'crystal', name: 'Crystal PvP', preset: true, armor: 'netherite', swordTier: 'netherite', axeTier: 'netherite',
+      arrowTips: ['slowfall'],
+      items: ['sword', 'pick', 'axe', 'crossbow', 'end_crystal', 'obsidian', 'respawn_anchor', 'glowstone', 'totem', 'pearl', 'egap']
+    },
+    mace: {
+      key: 'mace', name: 'Mace / Rocket', preset: true, armor: 'netherite', swordTier: 'netherite',
+      items: ['mace', 'elytra', 'firework', 'windcharge', 'sword', 'pearl', 'gapple']
+    },
+    nodebuff: {
+      key: 'nodebuff', name: 'Netherite Pot / NoDebuff', preset: true, armor: 'netherite', swordTier: 'netherite', axeTier: 'netherite',
+      items: ['sword', 'axe', 'pot_health', 'pot_speed', 'pot_strength', 'gapple', 'pearl']
+    },
+    cart: {
+      key: 'cart', name: 'Cart PvP', preset: true, armor: 'netherite', swordTier: 'netherite',
+      items: ['sword', 'tnt_minecart', 'rail', 'obsidian', 'flint_steel', 'gapple', 'pearl']
+    },
+    axeshield: {
+      key: 'axeshield', name: 'Axe Shield', preset: true, armor: 'diamond', swordTier: 'diamond', axeTier: 'diamond',
+      items: ['axe', 'sword', 'crossbow', 'gapple']
+    },
+    smp: {
+      key: 'smp', name: 'SMP / Lifesteal', preset: true, armor: 'netherite', swordTier: 'netherite', axeTier: 'netherite',
+      arrowTips: ['harming'],
+      items: ['sword', 'axe', 'bow', 'totem', 'pearl', 'gapple', 'cobweb', 'water_bucket', 'planks']
+    },
+    duel: {
+      key: 'duel', name: 'Sword Duel', preset: true, armor: 'diamond', swordTier: 'diamond',
+      items: ['sword', 'gapple']
+    },
+    uhc: {
+      key: 'uhc', name: 'Modern UHC', preset: true, armor: 'diamond', swordTier: 'diamond', axeTier: 'diamond',
+      items: ['sword', 'axe', 'pick', 'bow', 'crossbow', 'gapple', 'water_bucket', 'lava_bucket', 'cobweb', 'planks']
+    },
+    archer: {
+      key: 'archer', name: 'Wind Charge Archer', preset: true, armor: 'chainmail',
+      arrowTips: ['poison', 'slowness'],
+      items: ['bow', 'crossbow', 'windcharge', 'iron_sword', 'beef']
     }
   };
+  // The original kits - the only ones bots (and /kit, /botkit) use.
+  var BASE_KIT_KEYS = ['sword', 'axe', 'web'];
+
+  /**
+   * The gear a player actually gets for a kit: a preset kit overrides the
+   * menu's armor/sword/axe/arrow-tip choices (so a diamond kit stays
+   * diamond even with "use netherite" ticked); every other kit - or a
+   * custom loadout - just keeps what was chosen. A preset with several
+   * arrow tips keeps the player's pick if it's one of them.
+   */
+  /** Raw mace smash damage for a fall of `fallDist` blocks (already capped
+   * by the caller), with or without Density. */
+  function maceSmashDamage(fallDist, density) {
+    var C = COMBAT, left = fallDist, dmg = C.MACE_SMASH_BASE;
+    for (var i = 0; i < C.MACE_FALL_TIERS.length && left > 0; i++) {
+      var n = Math.min(left, C.MACE_FALL_TIERS[i][0]);
+      dmg += n * C.MACE_FALL_TIERS[i][1];
+      left -= n;
+    }
+    if (density) dmg += fallDist * C.MACE_DENSITY_PER_BLOCK;
+    return dmg;
+  }
+
+  function kitGear(kitKey, chosen, custom) {
+    var kit = KITS[kitKey];
+    var out = { armor: chosen.armor, swordTier: chosen.swordTier, axeTier: chosen.axeTier, arrowTip: chosen.arrowTip };
+    if (!kit || !kit.preset || custom) return out;
+    if (kit.armor) out.armor = kit.armor;
+    if (kit.swordTier) out.swordTier = kit.swordTier;
+    if (kit.axeTier) out.axeTier = kit.axeTier;
+    out.arrowTip = kit.arrowTips ? (kit.arrowTips.indexOf(chosen.arrowTip) !== -1 ? chosen.arrowTip : kit.arrowTips[0]) : 'none';
+    return out;
+  }
 
   /** True if the given kit includes an item by key. */
   function kitHasItem(kitKey, itemKey) {
@@ -405,8 +516,8 @@
     trident: [
       { key: 'loyalty', name: 'Loyalty III (returns to hand quickly)', def: true },
       { key: 'riptide', name: 'Riptide III (launches you instead, if wet - hold shift to throw anyway)', def: true },
-      { key: 'impaling', name: 'Impaling V (bonus damage if the target is in water)', def: true },
-      { key: 'channeling', name: 'Channeling (calls down lightning on a landed throw, during a thunderstorm)', def: false }
+      { key: 'impaling', name: 'Impaling V (bonus damage if the target is in water or out in the rain)', def: true },
+      { key: 'channeling', name: 'Channeling (calls down lightning on a landed throw, during a thunderstorm)', def: true }
     ],
     stick: [
       { key: 'knockback2', name: 'Knockback II', def: true },
@@ -416,7 +527,8 @@
       { key: 'efficiency', name: 'Efficiency V', def: true }
     ],
     mace: [
-      { key: 'breach', name: 'Breach (bypasses armor)', def: false }
+      { key: 'breach', name: 'Breach (bypasses armor)', def: true },
+      { key: 'density', name: 'Density V (smash attacks hit harder the further you fell)', def: true }
     ]
   };
 
@@ -456,6 +568,8 @@
     none: { key: 'none', name: 'None', value: 0, toughness: 0, protLevel: 0 },
     leather: { key: 'leather', name: 'Leather', value: 7, toughness: 0, protLevel: 0 },
     iron: { key: 'iron', name: 'Iron', value: 15, toughness: 0, protLevel: 2 },
+    // Only reachable through a preset kit (Wind Charge Archer).
+    chainmail: { key: 'chainmail', name: 'Chainmail', value: 12, toughness: 0, protLevel: 2 },
     diamond: { key: 'diamond', name: 'Diamond', value: ARMOR_VALUE, toughness: ARMOR_TOUGHNESS, protLevel: ARMOR_PROT_LEVEL },
     // A step above diamond, but deliberately only a SLIGHT one - a little
     // extra raw defense/toughness plus small resistance fractions
@@ -569,6 +683,38 @@
     }
   };
   var SHOP_KEYS = ['gear', 'loot', 'speed'];
+
+  // Items for sale, bought one bundle at a time (see the 'shopBuyItem'
+  // handler). `item` is the ITEMS key the bundle belongs to - if it isn't
+  // already in the buyer's loadout it gets added for the rest of the
+  // session (and refilled on respawn like the rest of the loadout).
+  // `ammo` is which pouch the `amount` goes into, when that differs from
+  // the item key (arrows are fired by the bow, but counted separately).
+  // Weapons have no amount - buying one just unlocks it.
+  SHOP.ITEMS = [
+    { key: 'gapple', item: 'gapple', amount: 4, cost: 6 },
+    { key: 'egap', item: 'egap', amount: 1, cost: 40 },
+    { key: 'totem', item: 'totem', amount: 1, cost: 35 },
+    { key: 'pot_health', item: 'pot_health', amount: 2, cost: 10 },
+    { key: 'pot_strength', item: 'pot_strength', amount: 1, cost: 12 },
+    { key: 'pot_speed', item: 'pot_speed', amount: 1, cost: 8 },
+    { key: 'pot_invis', item: 'pot_invis', amount: 1, cost: 15 },
+    { key: 'pearl', item: 'pearl', amount: 4, cost: 12 },
+    { key: 'windcharge', item: 'windcharge', amount: 8, cost: 8 },
+    { key: 'arrows', item: 'bow', ammo: 'arrow', amount: 16, cost: 6, name: 'Arrows' },
+    { key: 'firework', item: 'firework', amount: 8, cost: 8 },
+    { key: 'tnt', item: 'tnt', amount: 2, cost: 15 },
+    { key: 'lava_bucket', item: 'lava_bucket', amount: 1, cost: 10 },
+    { key: 'cobweb', item: 'cobweb', cost: 20 },
+    { key: 'wolf_spawn_egg', item: 'wolf_spawn_egg', amount: 1, cost: 18 },
+    { key: 'creeper_spawn_egg', item: 'creeper_spawn_egg', amount: 1, cost: 18 },
+    { key: 'crossbow', item: 'crossbow', cost: 35 },
+    { key: 'trident', item: 'trident', cost: 50 },
+    { key: 'spear', item: 'spear', cost: 50 },
+    { key: 'mace', item: 'mace', cost: 70 }
+  ];
+  SHOP.ITEM_BY_KEY = {};
+  for (var si = 0; si < SHOP.ITEMS.length; si++) SHOP.ITEM_BY_KEY[SHOP.ITEMS[si].key] = SHOP.ITEMS[si];
 
   /** The multiplier an upgrade is worth at `level` (1 when unbought). */
   function shopEffect(key, level) {
@@ -693,14 +839,15 @@
     AXE_STUN: 3.0,
 
     // Mace: a landed smash attack (falling + not on ground, same rule as a
-    // crit) deals this much plus fall distance (capped) times the Density V
-    // rate, instead of the normal crit multiplier. Tuned so the one-shot
-    // point against a full diamond/Protection IV target is a genuine
-    // 15-block fall (~68 raw -> ~20.6 after armor, against 20 max health) -
-    // shorter falls scale down from there instead of already being lethal
-    // well before 15 blocks.
+    // crit) deals MACE_SMASH_BASE plus a bonus for the distance fallen
+    // (capped at MACE_MAX_FALL), instead of the normal crit multiplier.
+    // Same falloff shape as vanilla - the first few blocks count for the
+    // most - but scaled well down: it used to be a flat 4.4 per block, so
+    // a modest drop one-shot anyone. See maceSmashDamage().
     MACE_SMASH_BASE: 2,
-    MACE_DENSITY_PER_BLOCK: 4.4,
+    MACE_FALL_TIERS: [[3, 1.5], [5, 0.75], [Infinity, 0.35]], // [blocks, damage per block]
+    // The Density V enchant: extra damage per block fallen, on top.
+    MACE_DENSITY_PER_BLOCK: 0.4,
     MACE_MAX_FALL: 24,
     // Wind Burst III: upward velocity given to the wielder right after a
     // smash lands, tuned to this arena's scale (not a literal port of
@@ -884,6 +1031,9 @@
     // Totem of Undying: what a save leaves you with - a sliver of health and
     // a few seconds of buffs to actually get you out of danger, same shape
     // as vanilla's totem pop.
+    // Magma block damage per second (see server.js's tick).
+    MAGMA_DPS: 1,
+
     TOTEM_HEALTH: 1,
     TOTEM_REGEN_LEVEL: 2,
     TOTEM_REGEN_SECONDS: 4,
@@ -1035,10 +1185,17 @@
     LIQUID: LIQUID,
     WEB: WEB,
     POWDER_SNOW: POWDER_SNOW,
+    BOUNCY: BOUNCY,
+    SLOW: SLOW,
+    MAGMA: MAGMA,
+    SLIPPERY: SLIPPERY,
     HARDNESS: HARDNESS,
     TILES: TILES,
     ITEMS: ITEMS,
     KITS: KITS,
+    BASE_KIT_KEYS: BASE_KIT_KEYS,
+    maceSmashDamage: maceSmashDamage,
+    kitGear: kitGear,
     kitHasSlot: kitHasSlot,
     kitHasItem: kitHasItem,
     ENCHANT_DEFS: ENCHANT_DEFS,

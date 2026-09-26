@@ -344,6 +344,51 @@
     blobs(tiles[T.GLOWSTONE], '#fff0a0', 12, 2, 469);
     blobs(tiles[T.GLOWSTONE], '#c9963a', 8, 1, 479);
 
+    // Slime block: bright translucent-looking green with a darker core.
+    fill(tiles[T.SLIME], '#76c95a', 6, 501);
+    blobs(tiles[T.SLIME], '#9ee07e', 10, 2, 509);
+    {
+      const t = tiles[T.SLIME];
+      for (let y = 4; y < 12; y++) for (let x = 4; x < 12; x++) px(t, x, y, 84, 160, 62, 255);
+      for (let y = 5; y < 11; y++) for (let x = 5; x < 11; x++) px(t, x, y, 96, 178, 72, 255);
+    }
+
+    // Soul sand: dark brown with faint screaming-face hollows.
+    fill(tiles[T.SOUL_SAND], '#5a4332', 12, 521);
+    blobs(tiles[T.SOUL_SAND], '#3e2d22', 10, 1, 529);
+    {
+      const t = tiles[T.SOUL_SAND];
+      for (const [fx, fy] of [[3, 4], [10, 9]]) {
+        px(t, fx, fy, 38, 27, 20, 255); px(t, fx + 2, fy, 38, 27, 20, 255);
+        px(t, fx, fy + 2, 38, 27, 20, 255); px(t, fx + 1, fy + 2, 38, 27, 20, 255); px(t, fx + 2, fy + 2, 38, 27, 20, 255);
+      }
+    }
+
+    // Magma block: near-black crust split by glowing orange cracks.
+    fill(tiles[T.MAGMA], '#4a1e0e', 10, 541);
+    {
+      const t = tiles[T.MAGMA];
+      const rnd = rng(547);
+      for (let l = 0; l < 6; l++) {
+        let x = (rnd() * TILE) | 0, y = (rnd() * TILE) | 0;
+        for (let i = 0; i < 9; i++) {
+          px(t, x, y, 255, 140, 40, 255);
+          x += ((rnd() * 3) | 0) - 1; y += ((rnd() * 3) | 0) - 1;
+          if (x < 0 || y < 0 || x >= TILE || y >= TILE) break;
+        }
+      }
+    }
+
+    // Ice: pale blue with long diagonal glints.
+    fill(tiles[T.ICE], '#9cc8f2', 5, 561);
+    {
+      const t = tiles[T.ICE];
+      for (let i = 0; i < TILE; i++) {
+        px(t, i, (i + 3) % TILE, 222, 240, 255, 255);
+        px(t, i, (i + 10) % TILE, 200, 228, 252, 255);
+      }
+    }
+
     // break overlay stages 0..9 (transparent + growing dark cracks)
     for (let s = 0; s < 10; s++) {
       const t = tiles[T.CRACKS + s];
@@ -368,7 +413,7 @@
     // shader-blended tiles (WATER, GLASS), and the break-overlay layers.
     [T.GRASS_TOP, T.GRASS_SIDE, T.DIRT, T.STONE, T.COBBLE, T.LOG_SIDE, T.LOG_TOP,
       T.SAND, T.PLANKS, T.BEDROCK, T.OBSIDIAN, T.GRAVEL, T.BRICK, T.IRON_ORE, T.GOLD_ORE, T.TNT, T.TNT_MINECART, T.RAIL,
-      T.RESPAWN_ANCHOR, T.GLOWSTONE]
+      T.RESPAWN_ANCHOR, T.GLOWSTONE, T.SOUL_SAND, T.MAGMA]
       .forEach(idx => applyBevel(tiles[idx]));
 
     return tiles;
@@ -532,8 +577,8 @@
   // this is drawn as its own inflated box shell over the body (see
   // MCEntities.armorParts / Renderer.drawArmorLayer), not a tint on the
   // skin, so it reads as "wearing plates" rather than "recolored".
-  const ARMOR_COLORS = { leather: '#8a5a2e', iron: '#d3d5d8', diamond: '#3fd0c9', netherite: '#17161a' };
-  const ARMOR_FLECKS = { leather: '#c9915a', iron: '#ffffff', diamond: '#c8fff9', netherite: '#6a5a52' };
+  const ARMOR_COLORS = { leather: '#8a5a2e', chainmail: '#7c8088', iron: '#d3d5d8', diamond: '#3fd0c9', netherite: '#17161a' };
+  const ARMOR_FLECKS = { leather: '#c9915a', chainmail: '#3c3f45', iron: '#ffffff', diamond: '#c8fff9', netherite: '#6a5a52' };
   function paintArmor(tier, pieceKey, faceGrids) {
     const cv = document.createElement('canvas');
     cv.width = cv.height = 64;
@@ -912,6 +957,16 @@
       g.stroke();
       P(3, 7, 9, 1, '#c9a06a');
       P(11, 6, 2, 3, '#e0e0e0');
+    } else if (key === 'beef') {
+      // Cooked beef: a browned steak with a pale fat edge and a bone nub.
+      P(3, 5, 9, 7, '#7a3f1c');
+      P(4, 4, 7, 1, '#7a3f1c');
+      P(4, 12, 7, 1, '#7a3f1c');
+      P(4, 5, 7, 6, '#9c5427');
+      P(5, 6, 3, 2, '#b86a35');
+      P(2, 6, 1, 5, '#e8d2b0');
+      P(12, 7, 2, 3, '#e8e2d4');
+      P(13, 6, 1, 1, '#e8e2d4'); P(13, 10, 1, 1, '#e8e2d4');
     } else if (key === 'pearl') {
       const grd = g.createRadialGradient(S * 0.42, S * 0.4, S * 0.05, S * 0.5, S * 0.5, S * 0.42);
       grd.addColorStop(0, '#c8fff0');
@@ -935,14 +990,16 @@
       g.fillStyle = '#4caf50';
       g.beginPath(); g.ellipse(S * 0.62, S * 0.2, S * 0.14, S * 0.07, -0.5, 0, 6.29); g.fill();
     } else if (key === 'helmet' || key === 'chestplate' || key === 'leggings' || key === 'boots') {
-      // Diamond's cyan palette, or netherite's near-black one (matching the
-      // 3D armor layer's ARMOR_COLORS/ARMOR_FLECKS) if that tier was passed in.
+      // Diamond's cyan palette, or netherite's near-black / chainmail's
+      // grey one (matching the 3D armor layer's ARMOR_COLORS/ARMOR_FLECKS)
+      // if that tier was passed in.
       const netheriteArmor = tier === 'netherite';
-      const main = netheriteArmor ? '#221f24' : '#6fd8d4';
-      const shadow = netheriteArmor ? '#17161a' : '#57c2be';
-      const trim = netheriteArmor ? '#0d0c0f' : '#3fa9a6';
-      const shade = netheriteArmor ? '#0c0b0d' : '#173230';
-      const highlight = netheriteArmor ? '#6a5a52' : '#c8fef9';
+      const chain = tier === 'chainmail';
+      const main = netheriteArmor ? '#221f24' : chain ? '#8a8e96' : '#6fd8d4';
+      const shadow = netheriteArmor ? '#17161a' : chain ? '#6c7078' : '#57c2be';
+      const trim = netheriteArmor ? '#0d0c0f' : chain ? '#4a4d54' : '#3fa9a6';
+      const shade = netheriteArmor ? '#0c0b0d' : chain ? '#2e3036' : '#173230';
+      const highlight = netheriteArmor ? '#6a5a52' : chain ? '#c4c8ce' : '#c8fef9';
       if (key === 'helmet') {
         P(4, 2, 8, 3, main);
         P(3, 5, 10, 3, shadow);
@@ -1077,7 +1134,7 @@
         g.moveTo(S * 0.5, S * 0.31); g.lineTo(S * 0.59, S * 0.42); g.lineTo(S * 0.5, S * 0.53); g.lineTo(S * 0.41, S * 0.42);
         g.closePath(); g.fill();
       }
-    } else if (key === 'sword_plain') {
+    } else if (key === 'sword_plain' || key === 'iron_sword') {
       // Same shape as the Sharpness V sword, plain steel-grey blade instead
       // of the enchanted cyan - enchantments don't change an item's model in
       // vanilla either, just its glint, which this skips for simplicity.
