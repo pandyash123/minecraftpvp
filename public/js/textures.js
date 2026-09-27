@@ -899,7 +899,26 @@
    * for the 4 armor-piece keys (helmet/chestplate/leggings/boots) - pass the
    * player's actual armorTier so netherite renders in its own near-black
    * palette instead of always looking like diamond. */
+  // Legendary shop weapons: the ordinary weapon's icon, washed in their own
+  // colour so they're recognisable at a glance in the hotbar.
+  const LEGENDARY_TINT = {
+    dark_sword: '#3a0b52', lifesteal_sword: '#c3122c', magic_bow: '#9b3cff', sea_trident: '#10a4c4',
+    cheaters_axe: '#ffb000', speed_spear: '#22e07a', void_mace: '#5a1a9a'
+  };
+  const LEGENDARY_BASE = { dark_sword: 'sword', lifesteal_sword: 'sword', magic_bow: 'bow', sea_trident: 'trident',
+    cheaters_axe: 'axe', speed_spear: 'spear', void_mace: 'mace' };
   function itemIcon(key, size, tier, trim) {
+    if (LEGENDARY_TINT[key]) {
+      const cv = itemIcon(LEGENDARY_BASE[key], size, tier, trim);
+      const g = cv.getContext('2d');
+      g.globalCompositeOperation = 'source-atop';
+      g.globalAlpha = 0.55;
+      g.fillStyle = LEGENDARY_TINT[key];
+      g.fillRect(0, 0, cv.width, cv.height);
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'source-over';
+      return cv;
+    }
     const S = size || 48;
     const cv = document.createElement('canvas');
     cv.width = cv.height = S;

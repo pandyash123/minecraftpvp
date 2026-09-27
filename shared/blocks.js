@@ -366,8 +366,31 @@
     { key: 'iron_sword', name: 'Iron Sword', type: 'weapon', damage: 6, cooldown: 0.42, knockback: 1.0, mineSpeed: 0.4 },
     // Plain food: no hunger bar in this game, so it just heals outright -
     // weaker than a gapple (no absorption/regen) but you carry a stack.
-    { key: 'beef', name: 'Cooked Beef', type: 'food', heal: 6, absorb: 0, eatTime: 1.6, ammo: 64, mineSpeed: 0.3 }
+    { key: 'beef', name: 'Cooked Beef', type: 'food', heal: 6, absorb: 0, eatTime: 1.6, ammo: 64, mineSpeed: 0.3 },
+    // Legendary shop weapons (see SHOP.LEGENDARY). Each one has a `base`:
+    // the ordinary weapon it replaces in your loadout and behaves as for
+    // enchants/armor/shield rules (see baseKey()). Only one player can own
+    // each at a time.
+    { key: 'dark_sword', name: 'Dark Sword', type: 'weapon', base: 'sword', legendary: true, damage: 16, cooldown: 0.42, knockback: 1.0, mineSpeed: 0.4 },
+    { key: 'lifesteal_sword', name: 'Lifesteal Sword', type: 'weapon', base: 'sword', legendary: true, damage: 8, cooldown: 0.42, knockback: 1.0, mineSpeed: 0.4 },
+    { key: 'magic_bow', name: 'Magic Bow', type: 'bow', base: 'bow', legendary: true, maxDamage: 10, minDamage: 2, drawTime: 1.0, mineSpeed: 0.3 },
+    { key: 'sea_trident', name: 'Trident of the Sea', type: 'weapon', base: 'trident', legendary: true, damage: 8, cooldown: 0.9, knockback: 1.1, mineSpeed: 0.4, throwable: true },
+    { key: 'cheaters_axe', name: "Cheater's Axe", type: 'weapon', base: 'axe', legendary: true, damage: 10, cooldown: 0.9, knockback: 1.3, mineSpeed: 0.5 },
+    { key: 'speed_spear', name: 'Speed Spear', type: 'weapon', base: 'spear', legendary: true, damage: 7, cooldown: 1.1, knockback: 0.9, mineSpeed: 0.4, reach: 4.5, minReach: 1.2, pierce: true },
+    { key: 'void_mace', name: 'Void Mace', type: 'weapon', base: 'mace', legendary: true, damage: 7, cooldown: 0.9, knockback: 1.2, mineSpeed: 0.4 }
   ];
+  var ITEM_INDEX = {};
+  for (var ii = 0; ii < ITEMS.length; ii++) ITEM_INDEX[ITEMS[ii].key] = ITEMS[ii];
+
+  /** The ordinary weapon an item counts as: netherite/iron swords are
+   * swords, the legendary shop weapons are whatever they replace, and
+   * everything else is just itself. */
+  function baseKey(key) {
+    if (key === 'netherite_sword' || key === 'iron_sword') return 'sword';
+    if (key === 'netherite_axe') return 'axe';
+    var it = ITEM_INDEX[key];
+    return it && it.base ? it.base : key;
+  }
   for (var k = 0; k < ITEMS.length; k++) ITEMS[k].slot = k;
 
   // Ruleset presets, chosen at the menu for the human player and (separately)
@@ -376,32 +399,12 @@
   // exist for that player: its hotbar slot renders empty and using it is a
   // no-op both client and server side.
   var KITS = {
-    sword: { key: 'sword', name: 'Sword PvP', items: ['sword', 'bow', 'pearl', 'gapple', 'pick', 'cobble', 'planks', 'mace', 'spear', 'windcharge'] },
-    axe: { key: 'axe', name: 'Axe PvP', items: ['sword', 'bow', 'pearl', 'gapple', 'pick', 'cobble', 'planks', 'axe', 'mace', 'spear', 'windcharge'] },
-    web: {
-      key: 'web', name: 'Web PvP',
-      items: ['sword', 'bow', 'pearl', 'gapple', 'pick', 'cobble', 'planks', 'cobweb', 'axe', 'mace', 'spear', 'windcharge',
-        'obsidian', 'pot_strength', 'pot_speed', 'pot_fireres', 'pot_turtle', 'pot_health', 'pot_invis',
-        'crossbow', 'trident', 'stick', 'egap',
-        'water_bucket', 'lava_bucket', 'tnt', 'tnt_minecart', 'rail', 'flint_steel',
-        'powder_snow_bucket', 'totem', 'firework',
-        'end_crystal', 'respawn_anchor', 'glowstone', 'wolf_spawn_egg', 'creeper_spawn_egg']
-      // netherite_sword/netherite_axe are deliberately NOT listed here -
-      // they're a tier swap on top of sword/axe (see swordTier/axeTier,
-      // set at join), not separate items you'd pick alongside them. Only
-      // ever one sword and one axe in a loadout at a time. elytra is ALSO
-      // deliberately not listed here (or in any kit) - it's locked behind
-      // the admin-only '/elytra' command instead (see server.js's
-      // playerHasItem() and the 'elytraUnlocked' client event) - the Mace /
-      // Rocket preset below is the one kit that hands it out.
-    },
-
-    // Preset kits: a fixed loadout that ALSO fixes the gear the menu would
-    // otherwise let you pick - armor tier, sword/axe tier and (where the
-    // kit has tipped arrows) the arrow tip. See kitGear(). Item counts are
-    // the same as every other kit (freshAmmo). The shield is always in the
-    // offhand, so it isn't listed. Players only - bots stick to the three
-    // kits above (BASE_KIT_KEYS).
+    // Every kit is a fixed preset: the items, armor tier, sword/axe tier,
+    // arrow tip and enchantments (MC.defaultEnchantOpts) all come with it -
+    // nothing is picked separately. See kitGear(). Item counts come from
+    // freshAmmo. The shield is always in the offhand, so it isn't listed.
+    // The elytra only comes with the Mace / Rocket kit; anywhere else it's
+    // the admin-only '/elytra' unlock (see server.js's playerHasItem()).
     crystal: {
       key: 'crystal', name: 'Crystal PvP', preset: true, armor: 'netherite', swordTier: 'netherite', axeTier: 'netherite',
       arrowTips: ['slowfall'],
@@ -442,8 +445,17 @@
       items: ['bow', 'crossbow', 'windcharge', 'iron_sword', 'beef']
     }
   };
-  // The original kits - the only ones bots (and /kit, /botkit) use.
-  var BASE_KIT_KEYS = ['sword', 'axe', 'web'];
+  // What you get if a kit key is missing or unknown.
+  var DEFAULT_KIT = 'uhc';
+
+  /** The kit a bot uses to match a player's kit: the same one, as long as
+   * the bot AI can actually fight with it (it needs a sword or an axe) -
+   * otherwise Sword Duel. */
+  function botKit(kitKey) {
+    var kit = KITS[kitKey];
+    if (kit && (kit.items.indexOf('sword') !== -1 || kit.items.indexOf('axe') !== -1)) return kitKey;
+    return 'duel';
+  }
 
   /**
    * The gear a player actually gets for a kit: a preset kit overrides the
@@ -465,6 +477,15 @@
     return dmg;
   }
 
+  function findItem(query) {
+    var q = String(query || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!q) return null;
+    var norm = function (t) { return String(t).toLowerCase().replace(/[^a-z0-9]/g, ''); };
+    for (var i = 0; i < ITEMS.length; i++) if (norm(ITEMS[i].key) === q || norm(ITEMS[i].name) === q) return ITEMS[i];
+    for (var j = 0; j < ITEMS.length; j++) if (norm(ITEMS[j].key).indexOf(q) !== -1 || norm(ITEMS[j].name).indexOf(q) !== -1) return ITEMS[j];
+    return null;
+  }
+
   function kitGear(kitKey, chosen, custom) {
     var kit = KITS[kitKey];
     var out = { armor: chosen.armor, swordTier: chosen.swordTier, axeTier: chosen.axeTier, arrowTip: chosen.arrowTip };
@@ -478,7 +499,7 @@
 
   /** True if the given kit includes an item by key. */
   function kitHasItem(kitKey, itemKey) {
-    var kit = KITS[kitKey] || KITS.web;
+    var kit = KITS[kitKey] || KITS[DEFAULT_KIT];
     return kit.items.indexOf(itemKey) !== -1;
   }
 
@@ -658,85 +679,98 @@
     START_COINS: 10,
     COIN_PER_KILL: 10,
     COIN_KILL_STREAK_BONUS: 2,  // extra per kill in the current streak
-    // A slow trickle so someone having a bad run still reaches the first
-    // upgrade instead of being locked out of the whole system.
+    // A slow trickle so someone having a bad run still gets somewhere.
     COIN_IDLE_AMOUNT: 1,
     COIN_IDLE_SECONDS: 12,
-    MAX_LEVEL: 3,
-    // costs[n] buys level n+1. effect[n] is the multiplier at level n+1.
-    UPGRADES: {
-      gear: {
-        key: 'gear', name: 'Starting Gear', unit: 'ammo',
-        desc: 'Spawn with more of everything you carry',
-        costs: [15, 35, 65], effect: [1.4, 1.8, 2.3]
-      },
-      loot: {
-        key: 'loot', name: 'Loot Haul', unit: 'per kill',
-        desc: 'Every kill restocks you with far more',
-        costs: [15, 35, 65], effect: [1.5, 2.0, 2.6]
-      },
-      speed: {
-        key: 'speed', name: 'Swiftness', unit: 'move speed',
-        desc: 'Permanently quicker on your feet',
-        costs: [20, 45, 80], effect: [1.08, 1.15, 1.22]
-      }
-    }
+    // Rough coins-per-minute of average play (the trickle above plus a
+    // kill every couple of minutes) - what prices are pegged to, see
+    // legendaryCost().
+    COINS_PER_MINUTE: 10,
+    // How long the Luck Potion lasts, and how strong its buffs are next to
+    // the ordinary potions/golden apples.
+    LUCK_SECONDS: 300,
+    LUCK_MULT: 1.5,
+    // Magic Bow: its arrows carry every debuff at this fraction of the
+    // usual strength, and curve toward anyone within HOMING_RANGE blocks.
+    MAGIC_BOW_MULT: 0.75,
+    MAGIC_BOW_HOMING_RANGE: 2,
+    MAGIC_BOW_HOMING_TURN: 0.35,
+    // Lifesteal Sword: extra max health per kill (2 = one heart), capped.
+    LIFESTEAL_PER_KILL: 2,
+    LIFESTEAL_MAX_BONUS: 20,
+    // Trident of the Sea.
+    SEA_RIPTIDE_SPEED_LEVEL: 1,
+    SEA_RIPTIDE_SPEED_SECONDS: 5,
+    SEA_CHANNELING_BURN_SECONDS: 10,
+    SEA_RAIN_SECONDS: 60,
+    SEA_RAIN_COOLDOWN: 90,
+    // Cheater's Axe: every hit locks the target's shield this long.
+    CHEATER_STUN_SECONDS: 5,
+    // Speed Spear: a longer lunge on top of its shorter cooldown (ITEMS).
+    SPEED_SPEAR_LUNGE_MULT: 1.5,
+    // Void Mace.
+    VOID_MACE_SMASH_MULT: 1.75,
+    VOID_PULL_RANGE: 8,
+    VOID_PULL_SPEED: 9,
+    VOID_PULL_COOLDOWN: 3,
+    // A dropped legendary lies on the ground this long before it goes back
+    // in the shop, and whoever dropped it can't pick it straight back up.
+    GROUND_SECONDS: 120,
+    GROUND_PICKUP_DELAY: 5,
+    // /give won't hand back something you dropped this recently.
+    GIVE_DROP_COOLDOWN: 120,
+    // One of each in the arena at a time (except `unlimited` ones), and a
+    // weapon goes back in stock when its holder dies. `value` is how hard it
+    // is to get on a 1-10 scale (1 ~ 5 minutes of play, 10 ~ an hour); the
+    // price is worked out from it. `item` is the weapon it gives; the Luck
+    // Potion is drunk on the spot and the Soulbound Charm is a one-use ward.
+    LEGENDARY: [
+      { key: 'luck', name: 'Luck Potion', value: 5, desc: 'Every buff at 1.5x strength for 5 minutes. Back in stock once it wears off.' },
+      { key: 'dark_sword', item: 'dark_sword', name: 'Dark Sword', value: 3, desc: 'Replaces your sword. Twice the damage of netherite.' },
+      { key: 'lifesteal_sword', item: 'lifesteal_sword', name: 'Lifesteal Sword', value: 6, desc: 'Replaces your sword. +1 heart per kill, up to 10 extra (lost on death).' },
+      { key: 'magic_bow', item: 'magic_bow', name: 'Magic Bow', value: 4, desc: 'Replaces your bow. Arrows carry every debuff and home in slightly.' },
+      { key: 'sea_trident', item: 'sea_trident', name: 'Trident of the Sea', value: 3, desc: 'Riptide gives Speed, Channeling sets targets alight for 10s, V summons rain.' },
+      { key: 'cheaters_axe', item: 'cheaters_axe', name: "Cheater's Axe", value: 4, desc: 'Replaces your axe. Every hit disables their shield for 5s, raised or not.' },
+      { key: 'speed_spear', item: 'speed_spear', name: 'Speed Spear', value: 5, desc: 'Replaces your spear. Faster attacks, shorter cooldown, longer lunge.' },
+      { key: 'void_mace', item: 'void_mace', name: 'Void Mace', value: 8, desc: 'Replaces your mace. Hits far harder; right-click pulls enemies toward you.' },
+      { key: 'soulbound', name: 'Soulbound Charm', value: 4, unlimited: true, desc: 'The last legendary weapon you bought survives your next death. Used up after one.' }
+    ],
+    // Ordinary supplies: unlimited stock, and like the rest of your pouch
+    // they only last until you die. Anything your kit doesn't have (a bow
+    // for arrows, flint and steel for TNT...) comes with it for that life.
+    // `choices` lets the buyer pick which potion / which arrow tip.
+    ITEMS: [
+      { key: 'gapples', name: '10 Golden Apples', item: 'gapple', amount: 10, value: 1 },
+      { key: 'pearls', name: '5 Ender Pearls', item: 'pearl', amount: 5, value: 1 },
+      { key: 'potions', name: '2 Potions', amount: 2, value: 1,
+        choices: ['pot_health', 'pot_strength', 'pot_speed', 'pot_fireres', 'pot_turtle', 'pot_invis'] },
+      { key: 'egap', name: 'Enchanted Golden Apple', item: 'egap', amount: 1, value: 2 },
+      { key: 'windcharges', name: '32 Wind Charges', item: 'windcharge', amount: 32, value: 2 },
+      { key: 'fireworks', name: '32 Firework Rockets', item: 'firework', amount: 32, value: 2 },
+      { key: 'arrows', name: '64 Arrows', ammo: 'arrow', amount: 64, value: 2, needsBow: true },
+      { key: 'tipped', name: '32 Tipped Arrows', ammo: 'tipped_arrow', amount: 32, value: 2, needsBow: true,
+        choices: ['poison', 'harming', 'wither', 'slowness', 'slowfall', 'weakness'] },
+      { key: 'totems', name: '2 Totems of Undying', item: 'totem', amount: 2, value: 3 },
+      { key: 'tnt', name: '32 TNT', item: 'tnt', amount: 32, value: 3, also: ['flint_steel'] },
+      { key: 'tnt_minecart', name: '32 TNT Minecarts', item: 'tnt_minecart', amount: 32, value: 3, also: ['rail', 'flint_steel'] }
+    ]
   };
-  var SHOP_KEYS = ['gear', 'loot', 'speed'];
-
-  // Items for sale, bought one bundle at a time (see the 'shopBuyItem'
-  // handler). `item` is the ITEMS key the bundle belongs to - if it isn't
-  // already in the buyer's loadout it gets added for the rest of the
-  // session (and refilled on respawn like the rest of the loadout).
-  // `ammo` is which pouch the `amount` goes into, when that differs from
-  // the item key (arrows are fired by the bow, but counted separately).
-  // Weapons have no amount - buying one just unlocks it.
-  SHOP.ITEMS = [
-    { key: 'gapple', item: 'gapple', amount: 4, cost: 6 },
-    { key: 'egap', item: 'egap', amount: 1, cost: 40 },
-    { key: 'totem', item: 'totem', amount: 1, cost: 35 },
-    { key: 'pot_health', item: 'pot_health', amount: 2, cost: 10 },
-    { key: 'pot_strength', item: 'pot_strength', amount: 1, cost: 12 },
-    { key: 'pot_speed', item: 'pot_speed', amount: 1, cost: 8 },
-    { key: 'pot_invis', item: 'pot_invis', amount: 1, cost: 15 },
-    { key: 'pearl', item: 'pearl', amount: 4, cost: 12 },
-    { key: 'windcharge', item: 'windcharge', amount: 8, cost: 8 },
-    { key: 'arrows', item: 'bow', ammo: 'arrow', amount: 16, cost: 6, name: 'Arrows' },
-    { key: 'firework', item: 'firework', amount: 8, cost: 8 },
-    { key: 'tnt', item: 'tnt', amount: 2, cost: 15 },
-    { key: 'lava_bucket', item: 'lava_bucket', amount: 1, cost: 10 },
-    { key: 'cobweb', item: 'cobweb', cost: 20 },
-    { key: 'wolf_spawn_egg', item: 'wolf_spawn_egg', amount: 1, cost: 18 },
-    { key: 'creeper_spawn_egg', item: 'creeper_spawn_egg', amount: 1, cost: 18 },
-    { key: 'crossbow', item: 'crossbow', cost: 35 },
-    { key: 'trident', item: 'trident', cost: 50 },
-    { key: 'spear', item: 'spear', cost: 50 },
-    { key: 'mace', item: 'mace', cost: 70 }
-  ];
   SHOP.ITEM_BY_KEY = {};
-  for (var si = 0; si < SHOP.ITEMS.length; si++) SHOP.ITEM_BY_KEY[SHOP.ITEMS[si].key] = SHOP.ITEMS[si];
-
-  /** The multiplier an upgrade is worth at `level` (1 when unbought). */
-  function shopEffect(key, level) {
-    var up = SHOP.UPGRADES[key];
-    if (!up || !level) return 1;
-    var i = Math.max(0, Math.min(up.effect.length - 1, level - 1));
-    return up.effect[i];
+  for (var sii = 0; sii < SHOP.ITEMS.length; sii++) {
+    SHOP.ITEMS[sii].cost = legendaryCost(SHOP.ITEMS[sii].value);
+    SHOP.ITEM_BY_KEY[SHOP.ITEMS[sii].key] = SHOP.ITEMS[sii];
+  }
+  SHOP.LEGENDARY_BY_KEY = {};
+  for (var li = 0; li < SHOP.LEGENDARY.length; li++) {
+    SHOP.LEGENDARY[li].cost = legendaryCost(SHOP.LEGENDARY[li].value);
+    SHOP.LEGENDARY_BY_KEY[SHOP.LEGENDARY[li].key] = SHOP.LEGENDARY[li];
   }
 
-  /** What the next level of an upgrade costs, or null when maxed. */
-  function shopCost(key, level) {
-    var up = SHOP.UPGRADES[key];
-    if (!up || level >= up.costs.length) return null;
-    return up.costs[level];
-  }
-
-  /** A clean {gear,loot,speed} level map - used for a fresh player and to
-   * scrub anything a client claims about its own upgrades. */
-  function freshUpgrades() {
-    var out = {};
-    for (var i = 0; i < SHOP_KEYS.length; i++) out[SHOP_KEYS[i]] = 0;
-    return out;
+  /** Price for a 1-10 value: 1 is ~5 minutes of average play, 10 is ~an
+   * hour, straight line between, rounded to a tidy multiple of 5. */
+  function legendaryCost(value) {
+    var minutes = 5 + (value - 1) * (55 / 9);
+    return Math.round(minutes * SHOP.COINS_PER_MINUTE / 5) * 5;
   }
 
   // Every tipped-arrow option, in menu order. `none` is a plain arrow.
@@ -1193,7 +1227,8 @@
     TILES: TILES,
     ITEMS: ITEMS,
     KITS: KITS,
-    BASE_KIT_KEYS: BASE_KIT_KEYS,
+    DEFAULT_KIT: DEFAULT_KIT,
+    botKit: botKit,
     maceSmashDamage: maceSmashDamage,
     kitGear: kitGear,
     kitHasSlot: kitHasSlot,
@@ -1218,10 +1253,8 @@
     ARROW_TIP_KEYS: ARROW_TIP_KEYS,
     arrowTipKey: arrowTipKey,
     SHOP: SHOP,
-    SHOP_KEYS: SHOP_KEYS,
-    shopEffect: shopEffect,
-    shopCost: shopCost,
-    freshUpgrades: freshUpgrades,
+    baseKey: baseKey,
+    findItem: findItem,
     COMBAT: COMBAT,
     PHYS: PHYS,
     breakTime: breakTime,

@@ -122,7 +122,7 @@ function createGame(io, opts) {
 
   // Which ruleset (see MC.KITS) bots draw their loadout from - chosen at the
   // menu or via /botkit, independent of the human player's own /kit choice.
-  let defaultBotKit = MC.BASE_KIT_KEYS.includes(process.env.KIT) ? process.env.KIT : 'web';
+  let defaultBotKit = MC.botKit(process.env.KIT);
 
   // Bots always fight with fixed numbers, independent of whatever the human
   // player's own sword/axe currently is - otherwise buffing the player's
@@ -138,6 +138,8 @@ function createGame(io, opts) {
     sword: { key: 'sword', slot: MC.ITEMS.findIndex(i => i.key === 'sword'), damage: 6, cooldown: 0.42 },
     axe: { key: 'axe', slot: MC.ITEMS.findIndex(i => i.key === 'axe'), damage: 9, cooldown: 0.9 }
   };
+  // The bow's hotbar index, looked up by key for the same reason as above.
+  const BOT_BOW_SLOT = MC.ITEMS.findIndex(i => i.key === 'bow');
   function pickBotWeapon(kit) {
     if (!MC.kitHasItem(kit, 'axe')) return 'sword';
     return Math.random() < 0.65 ? 'sword' : 'axe';
@@ -243,10 +245,6 @@ function createGame(io, opts) {
     io.emit('weather', { kind: weather });
   }
 
-  function isWet(p) {
-    return weather !== 'clear' || isInWater(p);
-  }
-
   function itemBySlot(slot) { return MC.ITEMS[clamp(slot | 0, 0, MC.ITEMS.length - 1)]; }
 
   // Single source of truth for max stack sizes: each ITEMS entry's `ammo`
@@ -283,9 +281,9 @@ function createGame(io, opts) {
     return Physics.inWater(getBlock, p.x, p.y, p.z);
   }
 
-  /** Impaling's "touching water": standing in it, or caught out in the rain
-   * (or a thunderstorm) with nothing overhead - same as vanilla, where rain
-   * counts as long as the sky is open above you. */
+  /** "Touching water" for Impaling and Riptide: standing in it, or caught
+   * out in the rain (or a thunderstorm) with nothing overhead - same as
+   * vanilla, where rain counts as long as the sky is open above you. */
   function isWet(p) {
     if (isInWater(p)) return true;
     if (weather === 'clear') return false;
@@ -313,6 +311,17 @@ function createGame(io, opts) {
    * list if they built one (see customItems, set at join), otherwise their
    * chosen kit preset (see MC.KITS) - bots always use the latter. */
   function playerHasItem(p, key) {
+    // Legendary shop weapons: only whoever bought one has it, and while
+    // they do it replaces every ordinary weapon of its kind (see MC.baseKey).
+    const it = ITEM_BY_KEY[key];
+    if (it && it.legendary) return !!(p.legendary && p.legendary.has(key));
+    // Dropped this life? Gone until you respawn.
+    if (p.dropped && p.dropped.has(key)) return false;
+    if (p.legendary && p.legendary.size) {
+      const base = MC.baseKey(key);
+      for (const k of p.legendary) if (ITEM_BY_KEY[k].base === base) return false;
+    }
+    if (p.extraItems && p.extraItems.has(key)) return true;
     // Netherite sword/axe are a tier swap on top of sword/axe (see
     // swordTier/axeTier, set at join and mirrored by the client's own hotbar
     // build - see _initInventorySlots), never both at once: whichever one a
@@ -329,7 +338,6 @@ function createGame(io, opts) {
     return hasBaseItem(p, key);
   }
   function hasBaseItem(p, key) {
-    if (p.boughtItems && p.boughtItems.has(key)) return true;
     return p.customItems ? p.customItems.has(key) : MC.kitHasItem(p.kit, key);
   }
 
@@ -371,7 +379,7 @@ function createGame(io, opts) {
    * everywhere those need "which weapon type is this, really" instead of the
    * raw item key. */
   function baseWeaponKey(key) {
-    return (key === 'netherite_sword' || key === 'iron_sword') ? 'sword' : key === 'netherite_axe' ? 'axe' : key;
+    return MC.baseKey(key);
   }
 
   function makePlayer(id, name, isBot, armorTier, kit, customItems, enchantOpts, swordTier, axeTier, dogArmor, trims, arrowTip) {
@@ -388,7 +396,7 @@ function createGame(io, opts) {
     // A preset kit (MC.KITS[..].preset) fixes armor/sword/axe/arrow tip
     // regardless of the menu - see MC.kitGear. The menu itself only ever
     // offers diamond or netherite, so anything else has to come from a kit.
-    const gear = isBot ? null : MC.kitGear(MC.KITS[kit] ? kit : 'web', {
+    const gear = isBot ? null : MC.kitGear(MC.KITS[kit] ? kit : MC.DEFAULT_KIT, {
       armor: armorTier === 'netherite' ? 'netherite' : 'diamond',
       swordTier: swordTier === 'netherite' ? 'netherite' : 'diamond',
       axeTier: axeTier === 'netherite' ? 'netherite' : 'diamond',
@@ -397,7 +405,7 @@ function createGame(io, opts) {
     return {
       id, name: String(name || 'Player').slice(0, 16),
       bot: !!isBot,
-      kit: MC.KITS[kit] ? kit : (isBot ? defaultBotKit : 'web'),
+      kit: MC.KITS[kit] ? kit : (isBot ? defaultBotKit : MC.DEFAULT_KIT),
       customItems: custom,
       // The human player always wears the full diamond kit by default (see
       // MC.ARMOR) - optionally netherite instead, opt-in via the menu's "Use
@@ -425,10 +433,24 @@ function createGame(io, opts) {
       arrowTip: MC.arrowTipKey(gear ? gear.arrowTip : arrowTip),
       lastPoisonTick: 0, lastWitherTick: 0,
       coins: isBot ? 0 : MC.SHOP.START_COINS,
-      // Items bought from the shop that weren't in the loadout - they count
-      // as part of it for the rest of the session (see hasBaseItem).
-      boughtItems: new Set(),
-      upgrades: MC.freshUpgrades(),
+      // Legendary shop weapons this player holds (see the shop section), and
+      // the Lifesteal Sword's extra max health.
+      legendary: new Set(),
+      // Legendaries given by the admin /item command - extra copies that
+      // don't count against the shop's one-of-each stock.
+      adminLegendary: new Set(),
+      // Soulbound Charm: saves lastLegendary (the last legendary weapon
+      // bought) through one death.
+      soulbound: false, lastLegendary: null,
+      // This life only: items bought/given on top of the kit, and items
+      // dropped (see the 'dropItem' handler). Both reset on respawn.
+      extraItems: new Set(), dropped: new Set(),
+      // key -> when it was last dropped, so /give can't undo a drop.
+      recentDrops: {},
+      // Bought tipped arrows (their own pouch, ammo.tipped_arrow) and which
+      // tip they carry.
+      tippedTip: null,
+      bonusHealth: 0,
       lastCoinTick: now(),
       enchants: (isBot || preset) ? MC.defaultEnchantOpts() : mergeEnchantOpts(enchantOpts),
       x: s[0], y: s[1], z: s[2],
@@ -456,23 +478,12 @@ function createGame(io, opts) {
   /** A player's health cap - normally C.MAX_HEALTH, but an admin can lower
    * (or restore) it per player with /maxhealth, and it sticks through death. */
   function maxHp(p) {
-    return p.maxHealth || C.MAX_HEALTH;
+    return (p.maxHealth || C.MAX_HEALTH) + (p.bonusHealth || 0);
   }
 
-  /** freshAmmo() scaled by whatever Starting Gear level the player has
-   * bought - applied on every respawn and the moment the upgrade is bought,
-   * so it never takes a death to feel the purchase. */
-  function upgradedAmmo(p) {
-    const mult = MC.shopEffect('gear', p.upgrades && p.upgrades.gear);
-    const ammo = freshAmmo();
-    if (mult === 1) return ammo;
-    for (const k in ammo) ammo[k] = Math.floor(ammo[k] * mult);
-    return ammo;
-  }
-
-  /** Current coins + upgrade levels, for the owning client's shop UI. */
+  /** Coins plus what's in (and out of) stock, for a client's shop panel. */
   function shopState(p) {
-    return { coins: p.coins | 0, upgrades: Object.assign({}, p.upgrades) };
+    return { coins: p.coins | 0, stock: shopStock(), mine: ownerKey(p), soulbound: !!p.soulbound };
   }
   function sendShop(p) {
     if (p.socket) p.socket.emit('shopState', shopState(p));
@@ -489,13 +500,19 @@ function createGame(io, opts) {
     const s = (p.dummy && p.home) ? [p.home.x, p.home.y, p.home.z] : pick(spawns);
     p.x = s[0]; p.y = s[1]; p.z = s[2];
     p.vx = p.vy = p.vz = 0;
+    // The Lifesteal Sword's extra hearts don't survive a death.
+    p.bonusHealth = 0;
+    // Bought/given extras and drops only ever last one life.
+    p.extraItems = new Set();
+    p.dropped = new Set();
+    p.tippedTip = null;
     p.health = maxHp(p);
     // A little buffed absorption shield on top of full health/ammo - eases you
     // back into the fight instead of dropping you in exactly as fragile as
     // when you died.
     p.absorption = 4;
     p.alive = true;
-    p.ammo = upgradedAmmo(p);
+    p.ammo = freshAmmo();
     p.spawnAt = now();
     p.lastDamage = -99;
     p.fallFrom = null;
@@ -651,8 +668,8 @@ function createGame(io, opts) {
    * timed effect the tick loop (poison/wither) or the victim's own movement
    * (slowness/slow falling) picks up from here.
    */
-  function applyArrowTip(victim, shooter, t) {
-    const tip = MC.arrowTipKey(shooter && shooter.arrowTip);
+  function applyArrowTip(victim, shooter, t, arrowTip) {
+    const tip = MC.arrowTipKey(arrowTip || (shooter && shooter.arrowTip));
     if (tip === 'none') return;
     switch (tip) {
       case 'poison':
@@ -679,6 +696,28 @@ function createGame(io, opts) {
     }
     if (victim.socket) victim.socket.emit('effects', effectsSnapshot(victim, t));
     io.emit('effect', { kind: 'tip', tip, x: victim.x, y: victim.y + 1.2, z: victim.z });
+  }
+
+  /** Magic Bow arrows: every debuff a tipped arrow can carry, all at once,
+   * at MAGIC_BOW_MULT of the usual strength/duration. */
+  function applyMagicDebuffs(victim, shooter, t) {
+    const m = MC.SHOP.MAGIC_BOW_MULT;
+    victim.effects.poison = { level: 1, until: t + C.POISON_SECONDS * m };
+    victim.effects.wither = { level: 1, until: t + C.WITHER_SECONDS * m };
+    victim.effects.slowness = { level: Math.max(1, Math.round(C.ARROW_SLOWNESS_LEVEL * m)), until: t + C.ARROW_SLOWNESS_SECONDS * m };
+    victim.effects.weakness = { level: 1, until: t + C.WEAKNESS_SECONDS * m };
+    if (victim.socket) victim.socket.emit('effects', effectsSnapshot(victim, t));
+    io.emit('effect', { kind: 'tip', tip: 'wither', x: victim.x, y: victim.y + 1.2, z: victim.z });
+    applyDamage(victim, C.ARROW_HARMING_DAMAGE * m, shooter, 'harming', 0, 0, 0);
+  }
+
+  /** Disables `victim`'s shield for `seconds` - an axe breaking through a
+   * block, or a Cheater's Axe hit. */
+  function stunShield(victim, t, seconds) {
+    victim.shieldStunUntil = Math.max(victim.shieldStunUntil || 0, t + seconds);
+    victim.blocking = false;
+    if (victim.socket) victim.socket.emit('shieldStun', { duration: seconds });
+    io.emit('effect', { kind: 'shieldbreak', x: victim.x, y: victim.y + 1.2, z: victim.z });
   }
 
   /** Every currently-running effect on `p`, as {level, remaining-seconds} -
@@ -901,14 +940,17 @@ function createGame(io, opts) {
       // vanilla's "the weapon that dealt the killing blow") multiplies the
       // whole restock below - simulated as bonus ammo since this game has no
       // physical item drops to multiply.
-      // The shop's Loot Haul upgrade stacks on top of Looting, so a kill can
-      // restock several times what it used to for someone who's invested in it.
-      const lootMult = (cause === 'sword' && hasEnchant(source, 'sword', 'looting') ? C.LOOTING_KILL_MULT : 1)
-        * MC.shopEffect('loot', source.upgrades && source.upgrades.loot);
+      const lootMult = cause === 'sword' && hasEnchant(source, 'sword', 'looting') ? C.LOOTING_KILL_MULT : 1;
       // Coins for the shop - a flat bounty plus a little more the longer the
       // killer's current streak is running. Only real opponents (players and
       // bots) pay out; training/attack dummies are free to farm otherwise.
-      if (!victim.dummy) awardCoins(source, Math.round(MC.SHOP.COIN_PER_KILL + MC.SHOP.COIN_KILL_STREAK_BONUS * Math.max(0, source.streak - 1)));
+      // Duels don't pay out at all.
+      if (!victim.dummy && !opts.duel) awardCoins(source, Math.round(MC.SHOP.COIN_PER_KILL + MC.SHOP.COIN_KILL_STREAK_BONUS * Math.max(0, source.streak - 1)));
+      // Lifesteal Sword: every sword kill adds a heart to your max health.
+      if (cause === 'sword' && source.legendary.has('lifesteal_sword')) {
+        source.bonusHealth = Math.min(MC.SHOP.LIFESTEAL_MAX_BONUS, (source.bonusHealth || 0) + MC.SHOP.LIFESTEAL_PER_KILL);
+        source.health += MC.SHOP.LIFESTEAL_PER_KILL;
+      }
       source.health = Math.min(maxHp(source), source.health + 4);
       // Floored at the end rather than per-factor: Loot Haul's multiplier is
       // fractional, and fractional ammo counts leak into the HUD as 7.5 arrows.
@@ -940,7 +982,7 @@ function createGame(io, opts) {
         // Totems never stack past what you spawn with: each one is a free
         // extra life, so an uncapped kill restock let anyone on a streak pile
         // up dozens and become effectively unkillable in multiplayer.
-        if (key === 'totem') next = Math.max(source.ammo.totem || 0, Math.min(next, upgradedAmmo(source).totem));
+        if (key === 'totem') next = Math.max(source.ammo.totem || 0, Math.min(next, freshAmmo().totem));
         source.ammo[key] = next;
       }
       // Firework Rockets restock a flat amount per kill, no Looting scaling.
@@ -952,6 +994,11 @@ function createGame(io, opts) {
       if (source.socket) source.socket.emit('killreward', { health: source.health, ammo: source.ammo, streak: source.streak });
     }
     if (opts.duel) setTimeout(() => endDuel(victim), 0);
+    // A Luck Potion ends with its drinker's life - back in stock - and so do
+    // legendary weapons, bar one saved by a Soulbound Charm.
+    const luck = legendaryOwners.get('luck');
+    if (luck && luck.owner === ownerKey(victim)) releaseLegendary('luck');
+    if (victim.legendary && victim.legendary.size) loseLegendariesOnDeath(victim);
     io.emit('death', {
       victim: victim.id, victimName: victim.name,
       killer: source && source.id !== victim.id ? source.id : null,
@@ -1279,6 +1326,24 @@ function createGame(io, opts) {
     io.emit('effect', { kind: 'lightning', x, y, z });
   }
 
+  /** Magic Bow: bends an arrow's flight toward the nearest enemy within a
+   * couple of blocks of it, keeping its speed - a nudge, not a lock-on. */
+  function homeArrow(pr, h) {
+    let best = null, bestD = MC.SHOP.MAGIC_BOW_HOMING_RANGE;
+    for (const p of players.values()) {
+      if (!p.alive || p.id === pr.owner) continue;
+      const d = Math.hypot(p.x - pr.x, p.y + 0.9 - pr.y, p.z - pr.z);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    if (!best || bestD < 1e-3) return;
+    const sp = Math.hypot(pr.vx, pr.vy, pr.vz) || 1;
+    const a = Math.min(1, MC.SHOP.MAGIC_BOW_HOMING_TURN * 30 * h);
+    const tx = (best.x - pr.x) / bestD, ty = (best.y + 0.9 - pr.y) / bestD, tz = (best.z - pr.z) / bestD;
+    let vx = pr.vx / sp * (1 - a) + tx * a, vy = pr.vy / sp * (1 - a) + ty * a, vz = pr.vz / sp * (1 - a) + tz * a;
+    const l = Math.hypot(vx, vy, vz) || 1;
+    pr.vx = vx / l * sp; pr.vy = vy / l * sp; pr.vz = vz / l * sp;
+  }
+
   function stepProjectiles(dt) {
     const g = { arrow: C.ARROW_GRAVITY, pearl: C.PEARL_GRAVITY, windcharge: C.WINDCHARGE_GRAVITY, potion: C.POTION_GRAVITY, trident: C.TRIDENT_GRAVITY, firework: C.FIREWORK_GRAVITY };
     const alive = [];
@@ -1291,6 +1356,7 @@ function createGame(io, opts) {
       const h = dt / steps;
       for (let s = 0; s < steps && !removed; s++) {
         pr.vy -= g[pr.kind] * h;
+        if (pr.homing) homeArrow(pr, h);
         const nx = pr.x + pr.vx * h, ny = pr.y + pr.vy * h, nz = pr.z + pr.vz * h;
         // An arrow that flies through a flint-and-steel ground fire catches
         // fire itself - it'll ignite whatever it hits next, same as a Flame
@@ -1323,7 +1389,7 @@ function createGame(io, opts) {
               // and only the bow's own enchants (Power/Punch/Flame) apply to
               // a bow shot specifically, not a crossbow bolt.
               const weaponItem = ITEM_BY_KEY[pr.weaponKey] || ITEM_BY_KEY.bow;
-              const isBowShot = weaponItem.key === 'bow';
+              const isBowShot = weaponItem.type === 'bow';
               let dmg = weaponItem.minDamage + (weaponItem.maxDamage - weaponItem.minDamage) * pr.power;
               if (isBowShot && owner && hasEnchant(owner, 'bow', 'power')) dmg += C.POWER_DMG_BONUS;
               if (owner && owner.bot) dmg *= botDamageMult(owner);
@@ -1339,7 +1405,10 @@ function createGame(io, opts) {
               applyDamage(hit.player, Math.round(dmg), owner, 'arrow', (hx / hl) * kbMul, (hz / hl) * kbMul, isSelfHit ? C.BOW_BOOST_KB_Y : 0.36);
               // Tipped arrows land their effect on top of the hit itself -
               // but never on the shooter via a bow-boost self-hit.
-              if (!isSelfHit && hit.player.alive) applyArrowTip(hit.player, owner, t);
+              if (!isSelfHit && hit.player.alive) {
+                if (pr.weaponKey === 'magic_bow') applyMagicDebuffs(hit.player, owner, t);
+                else applyArrowTip(hit.player, owner, t, pr.tip);
+              }
               if (pr.burning || (isBowShot && owner && hasEnchant(owner, 'bow', 'flame'))) ignitePlayer(hit.player, t);
               if (owner && owner.socket) owner.socket.emit('arrowHit', { id: hit.player.id, dist: Math.hypot(hit.player.x - owner.x, hit.player.z - owner.z) });
             } else if (pr.kind === 'pearl') {
@@ -1358,6 +1427,11 @@ function createGame(io, opts) {
               const hx = pr.vx, hz = pr.vz, hl = Math.hypot(hx, hz) || 1;
               applyDamage(hit.player, dmg0, owner, 'trident', (hx / hl) * kbMul, (hz / hl) * kbMul, 0.5);
               if (channeling) strikeLightning(hit.player.x, hit.player.y + 1, hit.player.z, owner ? owner.id : null, true);
+              // Trident of the Sea: Channeling sets whoever it hits alight,
+              // storm or not.
+              if (pr.sea && owner && hasEnchant(owner, 'trident', 'channeling') && hit.player.alive) {
+                hit.player.burnUntil = Math.max(hit.player.burnUntil || 0, t + MC.SHOP.SEA_CHANNELING_BURN_SECONDS);
+              }
             } else if (pr.kind === 'firework') {
               explodeFirework(pr.owner, nx, ny, nz);
             } else {
@@ -1387,7 +1461,7 @@ function createGame(io, opts) {
             // steel would.
             const owner = players.get(pr.owner);
             const weaponItem = ITEM_BY_KEY[pr.weaponKey] || ITEM_BY_KEY.bow;
-            const flameShot = pr.burning || (weaponItem.key === 'bow' && owner && hasEnchant(owner, 'bow', 'flame'));
+            const flameShot = pr.burning || (weaponItem.type === 'bow' && owner && hasEnchant(owner, 'bow', 'flame'));
             if (flameShot) igniteTNTBlock(Math.floor(nx), Math.floor(ny), Math.floor(nz), pr.owner);
           }
           io.emit('projectileGone', { id: pr.id, x: pr.x, y: pr.y, z: pr.z, hit: true });
@@ -1478,7 +1552,8 @@ function createGame(io, opts) {
   }
 
   function setBotKit(bot, key) {
-    if (!MC.BASE_KIT_KEYS.includes(key)) return false;
+    if (!MC.KITS[key]) return false;
+    key = MC.botKit(key);
     bot.kit = key;
     // Drop a now-illegal axe back to the sword immediately, rather than
     // waiting for its next melee swing to notice.
@@ -1944,7 +2019,7 @@ function createGame(io, opts) {
       // Golden apples only kick in once genuinely low on health, gated by a
       // random per-check chance on top of a long cooldown so it doesn't
       // reliably eat the very first tick it qualifies.
-      if (bot.weaponMode === 'full' && bot.health < maxHp(bot) * 0.35 && bot.ammo.gapple > 0 &&
+      if (bot.weaponMode === 'full' && playerHasItem(bot, 'gapple') && bot.health < maxHp(bot) * 0.35 && bot.ammo.gapple > 0 &&
           t > (ai.nextEat || 0) && Math.random() < 0.2) {
         ai.nextEat = t + rand(5, 9);
         const gapple = ITEM_BY_KEY.gapple;
@@ -1997,7 +2072,7 @@ function createGame(io, opts) {
 
       // full: occasionally drop a cobweb near the player's feet to slow them
       // down - never builds with cobble/planks, just this one tactical block.
-      if (bot.weaponMode === 'full' && dist < 8 && dist > 1.5 && t > (ai.nextWeb || 0) && Math.random() < 0.15) {
+      if (bot.weaponMode === 'full' && playerHasItem(bot, 'cobweb') && dist < 8 && dist > 1.5 && t > (ai.nextWeb || 0) && Math.random() < 0.15) {
         ai.nextWeb = t + rand(4, 8);
         const wx = Math.floor(target.x), wy = Math.floor(target.y), wz = Math.floor(target.z);
         if (getBlock(wx, wy, wz) === ID.AIR && setBlock(wx, wy, wz, ID.COBWEB)) {
@@ -2039,10 +2114,10 @@ function createGame(io, opts) {
       }
 
       // bow
-      if (dist > 9 && dist < 45 && t > ai.nextShot && bot.ammo.arrow > 0 && lineOfSight(bot, target)) {
+      if (dist > 9 && dist < 45 && t > ai.nextShot && bot.ammo.arrow > 0 && playerHasItem(bot, 'bow') && lineOfSight(bot, target)) {
         ai.nextShot = t + rand(1.5, 4) / Math.max(0.4, bot.skill);
         bot.ammo.arrow--;
-        bot.slot = 1;
+        bot.slot = BOT_BOW_SLOT;
         const err = (1 - bot.skill) * 0.09;
         const flight = dist / C.ARROW_SPEED;
         const aimY = target.y + 1.0 + 0.5 * C.ARROW_GRAVITY * flight * flight;
@@ -2196,6 +2271,10 @@ function createGame(io, opts) {
         }
       }
     }
+
+    const luck = legendaryOwners.get('luck');
+    if (luck && t >= luck.until) releaseLegendary('luck');
+    stepGroundItems(t);
 
     for (const p of players.values()) {
       if (!p.alive) {
@@ -2408,10 +2487,211 @@ function createGame(io, opts) {
     io.volatile.emit('snapshot', { t: Date.now(), p: list, r: prj, w: wlv, c: crp });
   }
 
+  // -------------------------------------------------------------- shop ---
+  // Who holds each legendary right now: key -> { owner, name, until? }.
+  // `owner` is the holder's session id, so the item stays theirs through a
+  // short disconnect and is only released when the session expires (see
+  // the outer server's session store), when they swap it for another of
+  // the same kind, or - for the Luck Potion - when it wears off or they die.
+  const legendaryOwners = new Map();
+  function ownerKey(p) { return p.session || p.id; }
+
+  function shopStock() {
+    const t = now(), out = {};
+    for (const [key, h] of legendaryOwners) out[key] = { owner: h.owner, name: h.name, ground: !!h.ground, left: h.until ? Math.max(0, h.until - t) : null };
+    return out;
+  }
+  /** Every human in the arena gets the new stock list. */
+  function broadcastShop() {
+    for (const p of players.values()) if (!p.bot) sendShop(p);
+  }
+
+  // Luck Potion: each buff at LUCK_MULT times its normal potion/apple level.
+  const LUCK_EFFECTS = {
+    strength: Math.ceil(ITEM_BY_KEY.pot_strength.level * MC.SHOP.LUCK_MULT),
+    speed: Math.ceil(ITEM_BY_KEY.pot_speed.level * MC.SHOP.LUCK_MULT),
+    regeneration: Math.ceil(ITEM_BY_KEY.egap.regenLevel * MC.SHOP.LUCK_MULT),
+    resistance: Math.ceil(ITEM_BY_KEY.egap.resistLevel * MC.SHOP.LUCK_MULT),
+    fireResistance: 1
+  };
+  function applyLuck(p, until) {
+    const t = now();
+    for (const kind in LUCK_EFFECTS) p.effects[kind] = { level: LUCK_EFFECTS[kind], until };
+    delete p.effects.slowness;
+    if (p.socket) p.socket.emit('effects', effectsSnapshot(p, t));
+  }
+
+  /** Hands a freshly bought legendary to `p`. A weapon replaces any other
+   * legendary of the same kind they held (which goes back in stock). */
+  function grantLegendary(p, offer) {
+    const t = now();
+    if (offer.key === 'luck') {
+      const until = t + MC.SHOP.LUCK_SECONDS;
+      legendaryOwners.set('luck', { owner: ownerKey(p), name: p.name, until });
+      applyLuck(p, until);
+    } else {
+      giveLegendaryWeapon(p, offer.item, false);
+      p.lastLegendary = offer.item;
+    }
+    broadcastShop();
+  }
+
+  /** Puts legendary weapon `key` in `p`'s hands, swapping out any other
+   * legendary of the same kind they held. `adminCopy` ones (the /item
+   * command) are extras that don't touch the shop's stock. */
+  function giveLegendaryWeapon(p, key, adminCopy) {
+    const base = ITEM_BY_KEY[key].base;
+    for (const k of [...p.legendary]) if (ITEM_BY_KEY[k].base === base) takeLegendary(p, k, true);
+    p.legendary.add(key);
+    if (adminCopy) p.adminLegendary.add(key);
+    else legendaryOwners.set(key, { owner: ownerKey(p), name: p.name });
+    if (p.socket) p.socket.emit('legendary', { owned: [...p.legendary] });
+  }
+
+  /** Takes legendary weapon `key` off `p`. Their shop copy goes back in
+   * stock; an admin copy just disappears. */
+  function takeLegendary(p, key, quiet) {
+    if (!p.legendary.delete(key)) return;
+    if (!p.adminLegendary.delete(key)) {
+      const h = legendaryOwners.get(key);
+      if (h && h.owner === ownerKey(p)) legendaryOwners.delete(key);
+    }
+    if (p.socket && !quiet) p.socket.emit('legendary', { owned: [...p.legendary] });
+    broadcastShop();
+  }
+
+  /** Dying loses every legendary weapon - except, once, the last one you
+   * bought, if you had a Soulbound Charm. */
+  function loseLegendariesOnDeath(p) {
+    let kept = null;
+    if (p.soulbound && p.lastLegendary && p.legendary.has(p.lastLegendary)) {
+      kept = p.lastLegendary;
+      p.soulbound = false;
+    }
+    for (const k of [...p.legendary]) if (k !== kept) takeLegendary(p, k, true);
+    if (p.socket) {
+      p.socket.emit('legendary', { owned: [...p.legendary] });
+      if (kept) p.socket.emit('chat', { system: true, text: 'Your Soulbound Charm kept the ' + ITEM_BY_KEY[kept].name + '.' });
+    }
+    sendShop(p);
+  }
+
+  function releaseLegendary(key) {
+    const h = legendaryOwners.get(key);
+    if (!h) return;
+    legendaryOwners.delete(key);
+    if (!h.ground) {
+      for (const p of players.values()) {
+        if (ownerKey(p) !== h.owner || p.adminLegendary.has(key)) continue;
+        if (p.legendary.delete(key) && p.socket) p.socket.emit('legendary', { owned: [...p.legendary] });
+      }
+    } else {
+      broadcastGround();
+    }
+    broadcastShop();
+  }
+  /** Everything held by one session - it expired, or the holder left. */
+  function releaseOwner(owner) {
+    for (const [key, h] of [...legendaryOwners]) if (h.owner === owner) releaseLegendary(key);
+  }
+  if (!opts.duel && opts.sessions && opts.sessions.onExpire) opts.sessions.onExpire(releaseOwner);
+
+  /** Rejoining within the session window: your legendaries are still yours. */
+  function restoreLegendary(p) {
+    const me = ownerKey(p), t = now();
+    for (const [key, h] of legendaryOwners) {
+      if (h.owner !== me || h.ground) continue;
+      h.name = p.name;
+      if (key === 'luck') { if (h.until > t) applyLuck(p, h.until); }
+      else p.legendary.add(key);
+    }
+    if (p.socket) p.socket.emit('legendary', { owned: [...p.legendary] });
+    sendGround(p);
+  }
+
+  // ------------------------------------------------------ dropped items ---
+  // A dropped legendary lies where it fell (as a legendaryOwners entry with
+  // `ground` set) until someone walks over it or GROUND_SECONDS pass, when
+  // it goes back in the shop.
+  function groundList() {
+    const out = [];
+    for (const [key, h] of legendaryOwners) if (h.ground) out.push({ key, x: h.x, y: h.y, z: h.z });
+    return out;
+  }
+  function sendGround(p) { if (p.socket) p.socket.emit('groundItems', groundList()); }
+  function broadcastGround() { io.emit('groundItems', groundList()); }
+
+  function stepGroundItems(t) {
+    for (const [key, h] of [...legendaryOwners]) {
+      if (!h.ground) continue;
+      if (t >= h.until) { releaseLegendary(key); continue; }
+      const base = ITEM_BY_KEY[key].base;
+      for (const p of players.values()) {
+        if (p.bot || !p.alive) continue;
+        if (ownerKey(p) === h.droppedBy && t < h.droppedAt + MC.SHOP.GROUND_PICKUP_DELAY) continue;
+        if (Math.hypot(p.x - h.x, p.y - h.y, p.z - h.z) > 1.6) continue;
+        // Already holding a legendary of this kind - leave it for someone else.
+        if ([...p.legendary].some(k => ITEM_BY_KEY[k].base === base)) continue;
+        legendaryOwners.delete(key);
+        giveLegendaryWeapon(p, key, false);
+        io.emit('chat', { system: true, text: p.name + ' picked up the ' + ITEM_BY_KEY[key].name + '!' });
+        broadcastGround();
+        broadcastShop();
+        break;
+      }
+    }
+  }
+
+  /** Makes `key` part of `p`'s loadout for this life (bought or /give'd). */
+  function giveExtraItem(p, key) {
+    if (playerHasItem(p, key)) return;
+    const base = MC.baseKey(key);
+    if ([...p.legendary].some(k => ITEM_BY_KEY[k].base === base)) return;
+    p.dropped.delete(key);
+    p.extraItems.add(key);
+    if (p.socket) p.socket.emit('itemUnlocked', { key });
+  }
+
+  /** Arrow for a bow/crossbow shot: bought tipped arrows go first, then
+   * the kit's own. Returns the tip it carries, null for a plain one, or
+   * false if out of arrows. */
+  function takeArrow(p) {
+    if ((p.ammo.tipped_arrow | 0) > 0) { p.ammo.tipped_arrow--; return p.tippedTip; }
+    if (p.ammo.arrow > 0) { p.ammo.arrow--; return null; }
+    return false;
+  }
+
+  /** Buys one of MC.SHOP.ITEMS. Returns an error message, or null. */
+  function buyShopItem(p, offer, choice) {
+    let itemKey = offer.item, pouch = offer.ammo || offer.item;
+    if (offer.key === 'potions') {
+      if (!offer.choices.includes(choice)) return 'Pick which potion first.';
+      itemKey = pouch = choice;
+    }
+    if (offer.key === 'tipped' && !offer.choices.includes(choice)) return 'Pick which arrows first.';
+    if (p.coins < offer.cost) return 'Not enough coins for ' + offer.name + ' (need ' + offer.cost + ').';
+    p.coins -= offer.cost;
+    if (offer.needsBow) {
+      if (!['bow', 'crossbow', 'magic_bow'].some(k => playerHasItem(p, k))) giveExtraItem(p, 'bow');
+    } else {
+      giveExtraItem(p, itemKey);
+    }
+    for (const k of offer.also || []) giveExtraItem(p, k);
+    if (offer.key === 'tipped') {
+      // One tip at a time: switching tips swaps the whole pouch over.
+      if (p.tippedTip !== choice) p.ammo.tipped_arrow = 0;
+      p.tippedTip = choice;
+    }
+    p.ammo[pouch] = (p.ammo[pouch] | 0) + offer.amount;
+    if (p.socket) p.socket.emit('ammo', p.ammo);
+    sendShop(p);
+    return null;
+  }
+
   // ---------------------------------------------------------- sessions ---
   /** Brings back what this player had before (see the session store in the
    * outer server): coins and admin always, and in the main arena their
-   * shop upgrades, bought items and stats too. A duel keeps its own locked
+   * stats and elytra unlock too. A duel keeps its own locked
    * kit, so those don't come along into one. */
   function restoreSession(p) {
     const saved = opts.sessions && opts.sessions.load(p.session);
@@ -2419,20 +2699,19 @@ function createGame(io, opts) {
     if (typeof saved.coins === 'number') p.coins = saved.coins;
     if (saved.admin) p.admin = true;
     if (opts.duel) return;
-    if (saved.upgrades) p.upgrades = Object.assign(MC.freshUpgrades(), saved.upgrades);
-    if (saved.boughtItems) p.boughtItems = new Set(saved.boughtItems);
     if (saved.elytraUnlocked) p.elytraUnlocked = true;
+    if (saved.soulbound) p.soulbound = true;
+    if (saved.lastLegendary) p.lastLegendary = saved.lastLegendary;
     if (saved.maxHealth) { p.maxHealth = saved.maxHealth; p.health = Math.min(p.health, p.maxHealth); }
     p.kills = saved.kills | 0;
     p.deaths = saved.deaths | 0;
-    p.ammo = upgradedAmmo(p);
   }
   function saveSession(p) {
     if (!opts.sessions || !p.session) return;
     const data = { coins: p.coins | 0, admin: !!p.admin };
     if (!opts.duel) {
       Object.assign(data, {
-        upgrades: Object.assign({}, p.upgrades), boughtItems: [...p.boughtItems], elytraUnlocked: !!p.elytraUnlocked,
+        elytraUnlocked: !!p.elytraUnlocked, soulbound: !!p.soulbound, lastLegendary: p.lastLegendary,
         maxHealth: p.maxHealth, kills: p.kills, deaths: p.deaths
       });
     }
@@ -2502,7 +2781,7 @@ function createGame(io, opts) {
         socket.disconnect(true);
         return;
       }
-      const kit = duel ? duel.kit : (data && MC.KITS[data.kit] ? data.kit : 'web');
+      const kit = duel ? duel.kit : (data && MC.KITS[data.kit] ? data.kit : MC.DEFAULT_KIT);
       // Nobody else human around (typical "refresh the tab, click Play again")
       // -> treat this as a fresh session and clear whatever got built/broken
       // last time. Never wipes a map other real players are still using.
@@ -2545,8 +2824,8 @@ function createGame(io, opts) {
       // Anything restored from the session that the client has to add to
       // its own hotbar (see restoreSession).
       if (!duel) {
-        for (const key of me.boughtItems) socket.emit('itemUnlocked', { key });
         if (me.elytraUnlocked) socket.emit('elytraUnlocked');
+        restoreLegendary(me);
       }
       socket.broadcast.emit('playerJoin', publicPlayer(me));
       io.emit('chat', { system: true, text: name + ' joined the arena' });
@@ -2555,7 +2834,7 @@ function createGame(io, opts) {
         if (duel.bot && ![...players.values()].some(p => p.bot)) {
           botHacksEnabled = !!duel.bot.hacks;
           const kitDef = MC.KITS[duel.kit];
-          const bot = addBot(duel.bot.difficulty, (kitDef && kitDef.armor) || 'diamond', duel.kit, 'full');
+          const bot = addBot(duel.bot.difficulty, (kitDef && kitDef.armor) || 'diamond', MC.botKit(duel.kit), 'full');
           placeForDuel(bot);
         }
         io.emit('chat', { system: true, text: 'Duel! ' + MC.KITS[duel.kit].name + ' kit on ' + WorldGen.ARENAS[currentArena].name + '. First to die loses.' });
@@ -2614,9 +2893,9 @@ function createGame(io, opts) {
       if (t - me.lastAttack < cd * 0.85) return;
       // A thrown trident isn't in hand again until it "returns" - see the
       // 'shoot' handler, which sets this based on Loyalty.
-      if (item.key === 'trident' && t < (me.tridentAvailableAt || 0)) return;
+      if (weaponKey === 'trident' && t < (me.tridentAvailableAt || 0)) return;
 
-      const isSpear = item.key === 'spear';
+      const isSpear = weaponKey === 'spear';
       // Holding the attack button instead of tapping charges a stronger
       // thrust - only meaningful for the spear, ignored for every other item.
       const charged = isSpear && !!d.charged;
@@ -2663,7 +2942,7 @@ function createGame(io, opts) {
       // instead turns this into a smash attack, scaling with fall distance.
       let crit = false, smash = false;
       if (!me.onGround && me.vy < -0.15) {
-        if (item.key === 'mace') {
+        if (weaponKey === 'mace') {
           smash = true;
           // Density counts from the most recent high point (see smashPeak in
           // trackFall()) - it follows the player up through an elytra climb
@@ -2671,7 +2950,8 @@ function createGame(io, opts) {
           // right after a climb counts from wherever that climb topped out.
           const peak = me.smashPeak === null || me.smashPeak === undefined ? me.y : me.smashPeak;
           const fallDist = Math.min(C.MACE_MAX_FALL, Math.max(0, peak - me.y));
-          dmg = Math.ceil(MC.maceSmashDamage(fallDist, hasEnchant(me, 'mace', 'density')));
+          dmg = Math.ceil(MC.maceSmashDamage(fallDist, hasEnchant(me, 'mace', 'density')) *
+            (item.key === 'void_mace' ? MC.SHOP.VOID_MACE_SMASH_MULT : 1));
           kbMul += 0.8;
         } else {
           dmg = Math.ceil(dmg * 1.5);
@@ -2707,13 +2987,16 @@ function createGame(io, opts) {
       if (me.sprint) kbMul += 0.5;
 
       const fireAspect = weaponKey === 'sword' && hasEnchant(me, 'sword', 'fireAspect');
-      const impaling = item.key === 'trident' && hasEnchant(me, 'trident', 'impaling');
+      const impaling = weaponKey === 'trident' && hasEnchant(me, 'trident', 'impaling');
       for (const victim of hits) {
         const dx = victim.x - me.x, dz = victim.z - me.z;
         const l = Math.hypot(dx, dz) || 1;
         const victimDmg = dmg + (impaling && isWet(victim) ? C.TRIDENT_IMPALING_BONUS_DMG : 0);
         applyDamage(victim, victimDmg, me, weaponKey, (dx / l) * 0.55 * kbMul, (dz / l) * 0.55 * kbMul, 0.42);
         if (fireAspect) ignitePlayer(victim, t);
+        // Cheater's Axe: the shield goes down for a while on every hit,
+        // whether or not it was even raised.
+        if (item.key === 'cheaters_axe' && victim.alive) stunShield(victim, t, MC.SHOP.CHEATER_STUN_SECONDS);
       }
       for (const w of wolfHits) damageWolf(w, dmg, me);
       for (const cr of creeperHits) damageCreeper(cr, dmg, me);
@@ -2735,6 +3018,7 @@ function createGame(io, opts) {
         const fx = -Math.sin(me.yaw), fz = -Math.cos(me.yaw); // yaw 0 == -Z
         let mul = C.SPEAR_LUNGE_SPEED * (me.onGround ? 1 : C.SPEAR_LUNGE_AIR_MULT);
         if (charged) mul *= C.SPEAR_CHARGE_LUNGE_MULT;
+        if (item.key === 'speed_spear') mul *= MC.SHOP.SPEED_SPEAR_LUNGE_MULT;
         const lvx = fx * mul, lvz = fz * mul;
         me.vx += lvx; me.vz += lvz;
         socket.emit('launch', { vx: lvx, vz: lvz });
@@ -2762,53 +3046,112 @@ function createGame(io, opts) {
 
     // Shop purchases are decided entirely here: the client sends only which
     // upgrade it wants, and gets the authoritative coins/levels back.
-    socket.on('shopBuy', key => {
+    // The legendary shop (main arena only): one of each item in the arena
+    // at a time - see grantLegendary().
+    socket.on('shopBuy', (key, choice) => {
       if (!me || typeof key !== 'string') return;
-      if (opts.duel) { socket.emit('chat', { system: true, text: 'The shop is closed during a duel.' }); return; }
-      const up = MC.SHOP.UPGRADES[key];
-      if (!up) return;
-      const level = me.upgrades[key] | 0;
-      const cost = MC.shopCost(key, level);
-      if (cost === null) { socket.emit('chat', { system: true, text: up.name + ' is already maxed out.' }); return; }
-      if (me.coins < cost) { socket.emit('chat', { system: true, text: 'Not enough coins for ' + up.name + ' (need ' + cost + ').' }); return; }
-      me.coins -= cost;
-      me.upgrades[key] = level + 1;
-      // Starting Gear is about what you spawn with, but waiting for a death
-      // to feel a purchase is miserable - top up on the spot as well.
-      if (key === 'gear') {
-        const ammo = upgradedAmmo(me);
-        for (const k in ammo) me.ammo[k] = Math.max(me.ammo[k] | 0, ammo[k]);
-        socket.emit('ammo', me.ammo);
+      const reply = text => socket.emit('chat', { system: true, text });
+      if (opts.duel) { reply('The shop is closed during a duel.'); return; }
+      if (!me.alive) { reply('Wait until you respawn.'); return; }
+      const item = MC.SHOP.ITEM_BY_KEY[key];
+      if (item) {
+        const err = buyShopItem(me, item, typeof choice === 'string' ? choice : null);
+        reply(err || 'Bought ' + item.name + (item.choices ? ' (' + (ITEM_BY_KEY[choice] ? ITEM_BY_KEY[choice].name : MC.ARROW_TIPS[choice].name) + ')' : '') + '.');
+        return;
       }
-      sendShop(me);
-      socket.emit('chat', { system: true, text: 'Bought ' + up.name + ' ' + me.upgrades[key] + '/' + MC.SHOP.MAX_LEVEL + '.' });
+      const offer = MC.SHOP.LEGENDARY_BY_KEY[key];
+      if (!offer) return;
+      if (offer.key === 'soulbound') {
+        if (me.soulbound) { reply('You already have a Soulbound Charm.'); return; }
+        if (me.coins < offer.cost) { reply('Not enough coins for the Soulbound Charm (need ' + offer.cost + ').'); return; }
+        me.coins -= offer.cost;
+        me.soulbound = true;
+        sendShop(me);
+        reply('Bought a Soulbound Charm' + (me.lastLegendary && me.legendary.has(me.lastLegendary) ? ' - your ' + ITEM_BY_KEY[me.lastLegendary].name + ' will survive your next death.' : '.'));
+        return;
+      }
+      const holder = legendaryOwners.get(key);
+      if (holder) {
+        reply(holder.ground ? 'The ' + offer.name + ' is lying on the ground somewhere - go and find it.'
+          : holder.owner === ownerKey(me) ? 'You already have the ' + offer.name + '.' : holder.name + ' has the ' + offer.name + ' right now.');
+        return;
+      }
+      if (!me.alive) { reply('Wait until you respawn.'); return; }
+      if (me.coins < offer.cost) { reply('Not enough coins for the ' + offer.name + ' (need ' + offer.cost + ').'); return; }
+      me.coins -= offer.cost;
+      grantLegendary(me, offer);
+      io.emit('chat', { system: true, text: me.name + ' bought the ' + offer.name + '!' });
     });
 
-    // Buying an item bundle (MC.SHOP.ITEMS). Same server-authoritative deal
-    // as upgrades: the client only asks, and gets told the result.
-    socket.on('shopBuyItem', key => {
-      if (!me || typeof key !== 'string') return;
-      if (opts.duel) { socket.emit('chat', { system: true, text: 'The shop is closed during a duel.' }); return; }
-      const offer = MC.SHOP.ITEM_BY_KEY[key];
-      if (!offer) return;
-      const item = ITEM_BY_KEY[offer.item];
-      const label = offer.name || item.name;
-      const owned = playerHasItem(me, offer.item);
-      // A weapon is a one-off unlock - nothing to buy twice.
-      if (!offer.amount && owned) { socket.emit('chat', { system: true, text: 'You already have the ' + label + '.' }); return; }
-      if (me.coins < offer.cost) { socket.emit('chat', { system: true, text: 'Not enough coins for ' + label + ' (need ' + offer.cost + ').' }); return; }
-      me.coins -= offer.cost;
-      if (!owned) {
-        me.boughtItems.add(offer.item);
-        socket.emit('itemUnlocked', { key: offer.item });
+    // Dropping an item (Q, or the inventory's drop slot). Legendary weapons
+    // land on the ground for anyone to pick up; anything else is just gone
+    // until you respawn.
+    socket.on('dropItem', key => {
+      if (!me || !me.alive || opts.duel || typeof key !== 'string') return;
+      const item = ITEM_BY_KEY[key];
+      if (!item || !playerHasItem(me, key)) return;
+      const t = now();
+      me.recentDrops[key] = t;
+      if (item.legendary) {
+        const shopCopy = !me.adminLegendary.has(key);
+        takeLegendary(me, key);
+        // An admin copy of something already out there just vanishes.
+        if (!shopCopy && legendaryOwners.has(key)) return;
+        // Thrown clear of the pickup radius, so it doesn't jump straight back.
+        const gx = me.x - Math.sin(me.yaw) * 2.5, gz = me.z - Math.cos(me.yaw) * 2.5;
+        legendaryOwners.set(key, { ground: true, x: gx, y: me.y, z: gz, until: t + MC.SHOP.GROUND_SECONDS, droppedBy: ownerKey(me), droppedAt: t });
+        io.emit('chat', { system: true, text: me.name + ' dropped the ' + item.name + '.' });
+        broadcastGround();
+        broadcastShop();
+        return;
       }
-      if (offer.amount) {
-        const pouch = offer.ammo || offer.item;
-        me.ammo[pouch] = (me.ammo[pouch] || 0) + offer.amount;
-        socket.emit('ammo', me.ammo);
+      me.extraItems.delete(key);
+      me.dropped.add(key);
+      if (me.offhandKey === key) me.offhandKey = 'shield';
+      socket.emit('itemRemoved', { key });
+    });
+
+    // Trident of the Sea: call the rain down (which also lets Riptide fire).
+    socket.on('summonRain', () => {
+      if (!me || !me.alive || opts.duel || !me.legendary.has('sea_trident')) return;
+      const t = now();
+      if (t - (me.lastRainCall || -1e9) < MC.SHOP.SEA_RAIN_COOLDOWN) {
+        socket.emit('chat', { system: true, text: 'The sea needs ' + Math.ceil(MC.SHOP.SEA_RAIN_COOLDOWN - (t - me.lastRainCall)) + 's to gather more rain.' });
+        return;
       }
-      sendShop(me);
-      socket.emit('chat', { system: true, text: 'Bought ' + label + (offer.amount ? ' x' + offer.amount : '') + '.' });
+      me.lastRainCall = t;
+      if (weather === 'clear') weather = 'rain';
+      weatherUntil = Math.max(weatherUntil, t + MC.SHOP.SEA_RAIN_SECONDS);
+      io.emit('weather', { kind: weather });
+      io.emit('chat', { system: true, text: me.name + ' called down the rain.' });
+    });
+
+    // Void Mace right-click: yank the enemy you're looking at toward you.
+    socket.on('voidPull', () => {
+      if (!me || !me.alive) return;
+      const item = itemForPlayer(me, me.slot);
+      if (!item || item.key !== 'void_mace') return;
+      const t = now();
+      if (t - (me.lastVoidPull || -1e9) < MC.SHOP.VOID_PULL_COOLDOWN) return;
+      const cp = Math.cos(me.pitch);
+      const lx = -Math.sin(me.yaw) * cp, ly = Math.sin(me.pitch), lz = -Math.cos(me.yaw) * cp;
+      const ex = me.x, ey = me.y + MC.PHYS.EYE, ez = me.z;
+      let best = null, bestD = MC.SHOP.VOID_PULL_RANGE;
+      for (const p of players.values()) {
+        if (!p.alive || p === me) continue;
+        const dx = p.x - ex, dy = p.y + 0.9 - ey, dz = p.z - ez;
+        const d = Math.hypot(dx, dy, dz);
+        if (d > bestD || d < 1e-3) continue;
+        if ((dx * lx + dy * ly + dz * lz) / d < 0.9) continue; // roughly where you're looking
+        best = p; bestD = d;
+      }
+      if (!best) return;
+      me.lastVoidPull = t;
+      const hx = me.x - best.x, hz = me.z - best.z, hl = Math.hypot(hx, hz) || 1;
+      const vx = hx / hl * MC.SHOP.VOID_PULL_SPEED, vz = hz / hl * MC.SHOP.VOID_PULL_SPEED, vy = 3;
+      best.vx += vx; best.vz += vz; best.vy = Math.max(best.vy, vy);
+      if (best.socket) best.socket.emit('launch', { vx, vy, vz });
+      io.emit('effect', { kind: 'pearl', x: best.x, y: best.y, z: best.z });
     });
 
     socket.on('shoot', d => {
@@ -2818,10 +3161,11 @@ function createGame(io, opts) {
       const item = itemForPlayer(me, me.slot);
       if (!item) return;
       if (item.type === 'bow') {
-        if (me.ammo.arrow <= 0) return;
-        me.ammo.arrow--;
+        const tip = takeArrow(me);
+        if (tip === false) return;
         const power = clamp(+d.power || 0, 0.1, 1);
-        spawnProjectile(me, 'arrow', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], power, { weaponKey: 'bow' });
+        spawnProjectile(me, 'arrow', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], power,
+          { weaponKey: item.key, homing: item.key === 'magic_bow', tip });
         socket.emit('ammo', me.ammo);
       } else if (item.type === 'crossbow') {
         // Shift+RMB loads a firework rocket instead of an arrow - this is the
@@ -2837,15 +3181,15 @@ function createGame(io, opts) {
         // Quick Charge is just its own short drawTime (client-side charge
         // timer, same mechanism as the bow) - Multishot fires several arrows
         // in a horizontal spread from a single arrow of ammo.
-        if (me.ammo.arrow <= 0) return;
-        me.ammo.arrow--;
+        const tip = takeArrow(me);
+        if (tip === false) return;
         const power = clamp(+d.power || 0, 0.1, 1);
         const n = C.CROSSBOW_MULTISHOT_COUNT, spread = C.CROSSBOW_MULTISHOT_SPREAD;
         for (let i = 0; i < n; i++) {
           const off = (i - (n - 1) / 2) * spread;
           const cosA = Math.cos(off), sinA = Math.sin(off);
           const ndx = dir[0] * cosA - dir[2] * sinA, ndz = dir[0] * sinA + dir[2] * cosA;
-          spawnProjectile(me, 'arrow', me.x, me.y + MC.PHYS.EYE, me.z, ndx, dir[1], ndz, power, { weaponKey: 'crossbow' });
+          spawnProjectile(me, 'arrow', me.x, me.y + MC.PHYS.EYE, me.z, ndx, dir[1], ndz, power, { weaponKey: 'crossbow', tip });
         }
         socket.emit('ammo', me.ammo);
       } else if (item.throwable) {
@@ -2866,10 +3210,15 @@ function createGame(io, opts) {
           me.vx += vx; me.vy = Math.max(me.vy, vy); me.vz += vz;
           me.tridentAvailableAt = t + C.TRIDENT_COOLDOWN_WITH_LOYALTY;
           socket.emit('launch', { vx, vy, vz });
+          // Trident of the Sea: a riptide leaves you with a burst of Speed.
+          if (item.key === 'sea_trident') {
+            giveEffect(me, 'speed', MC.SHOP.SEA_RIPTIDE_SPEED_LEVEL, MC.SHOP.SEA_RIPTIDE_SPEED_SECONDS, t);
+            socket.emit('effects', effectsSnapshot(me, t));
+          }
           return;
         }
         me.tridentAvailableAt = t + (hasEnchant(me, 'trident', 'loyalty') ? C.TRIDENT_COOLDOWN_WITH_LOYALTY : C.TRIDENT_COOLDOWN_NO_LOYALTY);
-        spawnProjectile(me, 'trident', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], 1);
+        spawnProjectile(me, 'trident', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], 1, item.key === 'sea_trident' ? { sea: true } : undefined);
       } else if (item.type === 'pearl') {
         const t = now();
         if (me.ammo.pearl <= 0 || t - me.lastAttack < item.cooldown) return;
@@ -3109,7 +3458,7 @@ function createGame(io, opts) {
         const weaponArg = (parts[5] || '').toLowerCase();
         const applyDiff = DIFFICULTY[diffArg] ? diffArg : null;
         const applyArmor = MC.ARMOR_TIERS[armorArg] ? armorArg : null;
-        const applyKit = MC.BASE_KIT_KEYS.includes(kitArg) ? kitArg : null;
+        const applyKit = MC.KITS[kitArg] ? MC.botKit(kitArg) : null;
         const applyWeapon = WEAPON_MODES.includes(weaponArg) ? weaponArg : null;
         if (applyDiff) defaultDifficulty = applyDiff;
         if (applyArmor) defaultBotArmor = applyArmor;
@@ -3131,15 +3480,9 @@ function createGame(io, opts) {
           text: me.name + ' set bots to ' + want + (applyDiff ? ' (' + applyDiff + ')' : '') + (applyArmor ? ' [' + applyArmor + ' armor]' : '') + (applyKit ? ' {' + applyKit + ' kit}' : '') + (applyWeapon ? ' <' + applyWeapon + '>' : '')
         });
         broadcastScores();
-      } else if (cmd === 'kit') {
-        const key = (parts[1] || '').toLowerCase();
-        if (!MC.BASE_KIT_KEYS.includes(key)) { reply('Usage: /kit <sword|axe|web>'); return; }
-        me.kit = key;
-        if (me.slot === MC.ITEMS.find(i => i.key === 'axe').slot && !MC.kitHasItem(key, 'axe')) me.slot = 0;
-        io.emit('chat', { system: true, text: me.name + ' switched to ' + key + ' kit' });
       } else if (cmd === 'botkit') {
         const key = (parts[1] || '').toLowerCase();
-        if (!MC.BASE_KIT_KEYS.includes(key)) { reply('Usage: /botkit <sword|axe|web>'); return; }
+        if (!MC.KITS[key]) { reply('Usage: /botkit <' + Object.keys(MC.KITS).join('|') + '>'); return; }
         defaultBotKit = key;
         let changed = 0;
         for (const p of players.values()) { if (p.bot && !p.dummy) { setBotKit(p, key); changed++; } }
@@ -3245,8 +3588,22 @@ function createGame(io, opts) {
         );
         io.emit('weather', { kind: weather });
         io.emit('chat', { system: true, text: me.name + ' set the weather to ' + weather });
+      } else if (cmd === 'give') {
+        // Anyone: get an item you don't already have, for this life. Not
+        // legendaries (that's the shop), not the elytra (admin only), and
+        // not something you just dropped.
+        const item = MC.findItem(parts.slice(1).join(' '));
+        if (!item) { reply('Usage: /give <item>'); return; }
+        if (item.legendary || item.key === 'elytra') { reply("You can't /give yourself the " + item.name + '.'); return; }
+        const base = MC.baseKey(item.key);
+        const hasKind = MC.ITEMS.some(i => MC.baseKey(i.key) === base && playerHasItem(me, i.key));
+        if (hasKind) { reply('You already have ' + (MC.baseKey(item.key) === item.key ? 'the ' + item.name : 'one of those') + '.'); return; }
+        if (now() - (me.recentDrops[item.key] || -1e9) < MC.SHOP.GIVE_DROP_COOLDOWN) { reply('You dropped that recently - you can\'t /give it back yet.'); return; }
+        giveExtraItem(me, item.key);
+        if (item.ammo) { me.ammo[item.key] = Math.max(me.ammo[item.key] | 0, item.ammo); socket.emit('ammo', me.ammo); }
+        reply('Gave you the ' + item.name + ' (until you die).');
       } else if (cmd === 'help') {
-        reply('Commands: /bots <0-16> [difficulty] [armor] [kit] [weapon], /difficulty <easy|normal|hard|random>, /botarmor <none|leather|iron|diamond|netherite>, /botkit <sword|axe|web>, /botweapon <fixed|versatile|full>, /botteam <on|off>, /bothacks <on|off>, /kit <sword|axe|web>, /botdiff <name> <level>, /dummy <0-3> [shield|noshield], /atkdummy <0-3>, /arena <' + WorldGen.ARENA_KEYS.join('|') + '>, /kill, /help');
+        reply('Commands: /give <item>, /bots <0-16> [difficulty] [armor] [kit] [weapon], /difficulty <easy|normal|hard|random>, /botarmor <none|leather|iron|diamond|netherite>, /botkit <kit>, /botweapon <fixed|versatile|full>, /botteam <on|off>, /bothacks <on|off>, /botdiff <name> <level>, /dummy <0-3> [shield|noshield], /atkdummy <0-3>, /arena <' + WorldGen.ARENA_KEYS.join('|') + '>, /kill, /help');
       } else {
         reply('Unknown command: ' + cmd + ' (try /help)');
       }
@@ -3321,20 +3678,50 @@ function createGame(io, opts) {
         const n = parseFloat(arg);
         if (arg !== 'reset' && !isFinite(n)) { reply(usage); return true; }
         for (const p of targets) {
-          const next = arg === 'reset' ? C.MAX_HEALTH : (arg[0] === '-' || arg[0] === '+') ? maxHp(p) + n : n;
+          const next = arg === 'reset' ? C.MAX_HEALTH : (arg[0] === '-' || arg[0] === '+') ? (p.maxHealth || C.MAX_HEALTH) + n : n;
           p.maxHealth = clamp(Math.round(next), 1, C.MAX_HEALTH);
-          if (p.health > p.maxHealth) p.health = p.maxHealth;
-          if (p.socket) p.socket.emit('heal', { health: p.health, absorption: p.absorption, maxHealth: p.maxHealth });
+          if (p.health > maxHp(p)) p.health = maxHp(p);
+          if (p.socket) p.socket.emit('heal', { health: p.health, absorption: p.absorption, maxHealth: maxHp(p) });
           io.emit('hp', { id: p.id, health: p.health, absorption: p.absorption });
         }
         reply('Max health now ' + targets.map(p => p.name + ' ' + p.maxHealth).join(', ') + '.');
         return true;
       }
+      if (cmd === 'item') {
+        // Anything at all, any amount, to anyone - legendaries included, as
+        // an extra copy even if someone already holds that one.
+        // /item <item> [amount] [player|@e]
+        let rest = parts.slice(1);
+        let who = [me];
+        if (rest.length > 1) {
+          const last = rest[rest.length - 1];
+          const maybe = !/^\d+$/.test(last) ? findPlayers(last).filter(p => !p.bot) : [];
+          if (maybe.length) { who = maybe; rest = rest.slice(0, -1); }
+        }
+        let amount = null;
+        if (rest.length > 1 && /^\d+$/.test(rest[rest.length - 1])) { amount = parseInt(rest.pop(), 10); }
+        const item = MC.findItem(rest.join(' '));
+        if (!item) { reply('Usage: /item <item> [amount] [player|@e]'); return true; }
+        for (const p of who) {
+          if (item.legendary) { giveLegendaryWeapon(p, item.key, true); continue; }
+          if (item.key === 'elytra') { p.elytraUnlocked = true; if (p.socket) p.socket.emit('elytraUnlocked'); continue; }
+          giveExtraItem(p, item.key);
+          const pouch = item.type === 'bow' || item.type === 'crossbow' ? 'arrow' : item.key;
+          if (item.ammo || amount) {
+            p.ammo[pouch] = (p.ammo[pouch] | 0) + (amount || item.ammo || 0);
+            if (p.socket) p.socket.emit('ammo', p.ammo);
+          }
+        }
+        reply('Gave ' + (amount ? amount + ' x ' : '') + item.name + ' to ' + who.map(p => p.name).join(', ') + '.');
+        return true;
+      }
       if (cmd === 'coins') {
-        // Give (or with a negative number, take) shop coins.
-        const n = parseInt(parts[2], 10);
-        if (parts.length < 3 || !isFinite(n)) { reply('Usage: /coins <name|@e> <amount>'); return true; }
-        const targets = findPlayers(parts[1]).filter(p => !p.bot);
+        // Give (or with a negative number, take) shop coins: /coins <amount>
+        // for yourself, or /coins <name|@e> <amount>.
+        const selfOnly = parts.length === 2;
+        const n = parseInt(selfOnly ? parts[1] : parts[2], 10);
+        if (parts.length < 2 || !isFinite(n)) { reply('Usage: /coins <amount> or /coins <name|@e> <amount>'); return true; }
+        const targets = selfOnly ? [me] : findPlayers(parts[1]).filter(p => !p.bot);
         if (!targets.length) { reply('No player matching "' + parts[1] + '"'); return true; }
         for (const p of targets) { p.coins = Math.max(0, (p.coins | 0) + n); sendShop(p); }
         reply('Coins now ' + targets.map(p => p.name + ' ' + p.coins).join(', ') + '.');
@@ -3352,7 +3739,7 @@ function createGame(io, opts) {
     socket.on('duelRequest', d => {
       if (!me || opts.duel || !opts.duels || !d) return;
       const reply = text => socket.emit('chat', { system: true, text });
-      const kit = MC.KITS[d.kit] ? d.kit : 'web';
+      const kit = MC.KITS[d.kit] ? d.kit : MC.DEFAULT_KIT;
       if (d.bot) {
         const difficulty = ['easy', 'normal', 'hard'].includes(d.bot.difficulty) ? d.bot.difficulty : 'normal';
         startDuel([me], kit, { difficulty, hacks: !!d.bot.hacks });
@@ -3387,6 +3774,7 @@ function createGame(io, opts) {
     socket.on('disconnect', () => {
       if (!me) return;
       saveSession(me);
+      if (!me.session) releaseOwner(ownerKey(me));
       // Walking out of a duel forfeits it.
       if (opts.duel && !opts.duel.over) endDuel(me);
       players.delete(me.id);
@@ -3400,7 +3788,7 @@ function createGame(io, opts) {
 
   // ------------------------------------------------------------ admin ---
   const ADMIN_HELP = '/weather <clear|rain|thunder>, /spawn, /kill <name|@e>, /elytra [name|@e], /effect <name|@e> <effect|clear> [level] [seconds], ' +
-    '/maxhealth <name|@e> <amount|-N|+N|reset>, /coins <name|@e> <amount>, /adminhelp';
+    '/maxhealth <name|@e> <amount|-N|+N|reset>, /coins [name|@e] <amount>, /item <item> [amount] [player|@e], /adminhelp';
   // Every timed effect the game actually does something with.
   const ADMIN_EFFECTS = ['strength', 'speed', 'slowness', 'resistance', 'fireResistance', 'regeneration',
     'invisibility', 'poison', 'wither', 'weakness', 'slowFalling'];
@@ -3479,11 +3867,13 @@ const io = new Server(server, { cors: { origin: '*' }, pingInterval: 5000, pingT
 
 // ------------------------------------------------------------- sessions ---
 // Each browser tab sends a random session id with 'join'. Whatever a player
-// has built up - coins, shop upgrades, bought items, admin unlock - is
-// saved against it when they leave a game and restored when they join the
-// next one, so hopping into a duel and back doesn't wipe it. Held in memory
-// only, and forgotten after SESSION_TTL of not being used.
-const SESSION_TTL = 30 * 60 * 1000;
+// has built up - coins, admin unlock, and (in the main arena) the legendary
+// shop items they hold - is kept against it when they leave a game and
+// restored when they join the next one, so hopping into a duel and back, or
+// a quick disconnect, doesn't wipe it. Held in memory only, and forgotten
+// after SESSION_TTL of not being used - at which point any legendaries go
+// back in the shop for someone else.
+const SESSION_TTL = 10 * 60 * 1000;
 const sessionStore = new Map();
 const sessions = {
   load(id) {
@@ -3495,11 +3885,22 @@ const sessions = {
   save(id, data) {
     if (!id) return;
     sessionStore.set(id, Object.assign(sessionStore.get(id) || {}, data, { savedAt: Date.now() }));
-  }
+  },
+  // Games that hold things per session (the main arena's legendaries)
+  // hear about it when one expires.
+  expireHandlers: [],
+  onExpire(fn) { this.expireHandlers.push(fn); }
 };
 setInterval(() => {
   const cutoff = Date.now() - SESSION_TTL;
-  for (const [id, s] of sessionStore) if (s.savedAt < cutoff) sessionStore.delete(id);
+  for (const [id, s] of sessionStore) {
+    if (s.savedAt >= cutoff) continue;
+    // Someone still playing keeps their session alive however long ago it
+    // was last saved.
+    if ([...main.players.values()].some(p => p.session === id)) { s.savedAt = Date.now(); continue; }
+    sessionStore.delete(id);
+    for (const fn of sessions.expireHandlers) fn(id);
+  }
 }, 60 * 1000);
 
 // ---------------------------------------------------------------- duels ---

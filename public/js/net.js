@@ -51,9 +51,9 @@
         const events = ['playerJoin', 'playerLeave', 'spawned', 'respawn', 'teleport', 'hurt', 'heal',
           'killreward', 'hp', 'death', 'block', 'snapshot', 'projectile', 'projectileGone', 'swing',
           'hitmarker', 'arrowHit', 'effect', 'scores', 'chat', 'ammo', 'shieldStun', 'launch',
-          'effects', 'weather', 'elytraUnlocked', 'itemUnlocked', 'wolfSpawn', 'wolfHp', 'wolfDeath', 'wolfTeleport', 'shopState',
+          'effects', 'weather', 'elytraUnlocked', 'legendary', 'wolfSpawn', 'wolfHp', 'wolfDeath', 'wolfTeleport', 'shopState',
           'creeperSpawn', 'creeperState', 'creeperDeath',
-          'duelInvite', 'duelStart', 'duelEnd', 'duelReturn',
+          'duelInvite', 'duelStart', 'duelEnd', 'duelReturn', 'itemUnlocked', 'itemRemoved', 'groundItems',
           // worldReset was missing here, so game.js's listener for it never
           // fired and an in-game terrain reset (or arena change) left
           // everyone still rendering the old map.
@@ -103,8 +103,10 @@
     hitAnchor(x, y, z) { if (this.socket) this.socket.emit('hitAnchor', { x, y, z }); }
     spawnMob() { if (this.socket) this.socket.emit('spawnMob'); }
     chat(text) { if (this.socket) this.socket.emit('chat', text); }
-    shopBuy(key) { if (this.socket) this.socket.emit('shopBuy', key); }
-    shopBuyItem(key) { if (this.socket) this.socket.emit('shopBuyItem', key); }
+    shopBuy(key, choice) { if (this.socket) this.socket.emit('shopBuy', key, choice); }
+    dropItem(key) { if (this.socket) this.socket.emit('dropItem', key); }
+    summonRain() { if (this.socket) this.socket.emit('summonRain'); }
+    voidPull() { if (this.socket) this.socket.emit('voidPull'); }
     duelRequest(d) { if (this.socket) this.socket.emit('duelRequest', d); }
     duelAnswer(d) { if (this.socket) this.socket.emit('duelAnswer', d); }
   }

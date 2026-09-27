@@ -43,7 +43,7 @@
         <tbody id="scoreboardBody"></tbody>
       </table>
     </div>
-    <div id="hint" class="hidden">Click to look around &middot; WASD move &middot; Space jump &middot; LMB attack/mine &middot; RMB use/place/block &middot; 1-9 or scroll to switch item &middot; E inventory &middot; B shop &middot; G duel &middot; Esc pause &middot; Tab scoreboard &middot; Enter chat</div>
+    <div id="hint" class="hidden">Click to look around &middot; WASD move &middot; Space jump &middot; LMB attack/mine &middot; RMB use/place/block &middot; 1-9 or scroll to switch item &middot; E inventory &middot; B shop &middot; G duel &middot; Q drop item &middot; V rain (Trident of the Sea) &middot; Esc pause &middot; Tab scoreboard &middot; Enter chat</div>
   </div>
 
   <div id="pauseMenu" class="hidden">
@@ -75,7 +75,11 @@
         <div class="invlabel">Hotbar</div>
         <div class="invrow" id="invHotbar"></div>
       </div>
-      <div class="invhint">Press E or Esc to close</div>
+      <div class="invsection">
+        <div class="invlabel">Drop</div>
+        <div class="invrow"><div class="slot invslot dropslot" id="invDropSlot"><span class="slotlabel">Drop (Q)</span></div></div>
+      </div>
+      <div class="invhint">Press E or Esc to close &middot; drag an item onto Drop, or press Q, to throw it away (legendaries land on the ground)</div>
     </div>
   </div>
 
@@ -122,8 +126,8 @@
 
   <div id="shopPanel" class="hidden">
     <div class="panel shoppanel">
-      <h1>Shop</h1>
-      <p class="sub">Earn coins by fighting, spend them on upgrades that last the rest of your session.</p>
+      <h1>Legendary Shop</h1>
+      <p class="sub">One of each in the arena. Yours until you've been gone 10 minutes.</p>
       <div class="shopCoins">You have <b id="shopCoins">0</b> coins</div>
       <div id="shopList"></div>
       <button type="button" id="shopCloseBtn">Close</button>
@@ -187,12 +191,6 @@
       <input id="nameInput" maxlength="16" placeholder="Your name" autocomplete="off">
       <label>Your kit</label>
       <select id="kitSelect">
-        <optgroup label="Classic">
-          <option value="sword">Sword PvP (no axe or cobwebs)</option>
-          <option value="axe">Axe PvP (no cobwebs)</option>
-          <option value="web" selected>Web PvP (everything)</option>
-        </optgroup>
-        <optgroup label="Preset kits (fixed armor, sword and axe)">
           <option value="crystal">Crystal PvP - netherite, crystals, anchors, totems</option>
           <option value="mace">Mace / Rocket - netherite, mace, elytra, fireworks</option>
           <option value="nodebuff">Netherite Pot / NoDebuff - netherite, potions</option>
@@ -200,11 +198,10 @@
           <option value="axeshield">Axe Shield - diamond, axe, crossbow</option>
           <option value="smp">SMP / Lifesteal - netherite, Harming arrows, totems</option>
           <option value="duel">Sword Duel - diamond, sword and gapples only</option>
-          <option value="uhc">Modern UHC - diamond, buckets, cobwebs</option>
+          <option value="uhc" selected>Modern UHC - diamond, buckets, cobwebs</option>
           <option value="archer">Wind Charge Archer - chainmail, bows, wind charges</option>
-        </optgroup>
       </select>
-      <p class="sub">Preset kits ignore the netherite and tipped-arrow options below and use their own gear.</p>
+      <p class="sub">Every kit comes with its own armor, weapons and enchantments. Bots use your kit too.</p>
       <label>Arena</label>
       <select id="arenaSelect">
         <option value="classic" selected>Ruined Keep - grass, trees and a terraced pyramid</option>
@@ -217,23 +214,7 @@
         <option value="canyon">Waterfall Canyon - two cliffs, a river gorge and bridges</option>
       </select>
       <p class="sub">Only applies when you're the only player - otherwise use /arena in chat.</p>
-      <label>Tipped arrows</label>
-      <select id="arrowTipSelect">
-        <option value="none" selected>Normal - no effect</option>
-        <option value="poison">Poison - heaviest damage over time, but never kills</option>
-        <option value="harming">Instant Harming - extra damage the moment it lands</option>
-        <option value="wither">Wither - damage over time that can finish someone off</option>
-        <option value="slowness">Slowness - cripples their movement speed</option>
-        <option value="slowfall">Slow Falling - floats them down, no fall damage</option>
-        <option value="weakness">Weakness - weakens the melee damage they deal</option>
-      </select>
-      <label class="checkline"><input type="checkbox" id="customLoadoutCheck"> Use a custom loadout instead (pick your own items below)</label>
-      <div id="customItemsList" class="hidden itemchecklist"></div>
-      <label class="checkline"><input type="checkbox" id="netheriteArmorCheck"> Use netherite armor instead of diamond (knockback/fall/blast resistance, a little extra protection)</label>
-      <label class="checkline"><input type="checkbox" id="netheriteSwordCheck"> Use netherite sword instead of diamond (slightly more damage)</label>
-      <label class="checkline"><input type="checkbox" id="netheriteAxeCheck"> Use netherite axe instead of iron (slightly more damage)</label>
       <label class="checkline"><input type="checkbox" id="dogArmorCheck"> Give wolves you spawn armor (more health, takes less damage)</label>
-      <p class="sub">Enchantments (armor/sword/axe/bow) are in their own panel below.</p>
       <label>Bots to fill the arena with (0-16)</label>
       <input id="botsInput" type="number" min="0" max="16" value="4">
       <label>Bot difficulty</label>
@@ -251,12 +232,6 @@
         <option value="diamond" selected>Diamond (Protection IV)</option>
         <option value="netherite">Netherite (Protection IV + resistances)</option>
       </select>
-      <label>Bot kit</label>
-      <select id="botKitSelect">
-        <option value="sword">Sword PvP (no axe or cobwebs)</option>
-        <option value="axe">Axe PvP (no cobwebs)</option>
-        <option value="web" selected>Web PvP (everything)</option>
-      </select>
       <label class="checkline"><input type="checkbox" id="dummyCheck"> Add a training dummy (stationary, doesn't fight back)</label>
       <label class="checkline sub"><input type="checkbox" id="dummyShieldCheck" checked> Training dummy holds a shield up</label>
       <label class="checkline"><input type="checkbox" id="atkDummyCheck"> Add an attacking dummy (fixed facing, fights back with whatever weapon last hit it)</label>
@@ -267,14 +242,14 @@
       <div id="resetTerrainMsg" class="hidden"></div>
       <div class="controls">
         <b>Controls</b> &mdash; WASD move &middot; Space jump &middot; Shift sneak &middot; Ctrl/R sprint &middot;
-        Left click attack / mine (hold with the spear to charge a stronger thrust) &middot; Right click place / shoot / throw a potion (splashes on impact, hold for bow &amp; apple) &middot;
+        Left click attack / mine (hold left or right click with the spear to charge a stronger thrust) &middot; Right click place / shoot / throw a potion (splashes on impact, hold for bow &amp; apple) &middot;
         hold Right click with sword/pickaxe/axe to raise your shield (blocks what's in front of you, but not hits from well above or below) &middot;
         the axe hits harder, and its first hit through a raised shield still gets blocked but disables that shield for 3s &middot;
         bots can wear a shield down too - repeated blocked hits in a row disable it (3 on Easy, 2 on Normal, 1 on Hard) &middot;
         1-9 / scroll wheel switch item &middot; E inventory (drag items to/from your backpack) &middot; F5 or the view button cycles 1st/3rd person &middot; Enter chat &middot; Esc pause / release mouse
         <br><br><b>Commands</b> &mdash; /bots &lt;0-16&gt; [difficulty] [armor] [kit] [weapon] &middot; /difficulty &lt;easy|normal|hard|random&gt; &middot;
-        /botarmor &lt;none|leather|iron|diamond&gt; &middot; /botkit &lt;sword|axe|web&gt; &middot; /botweapon &lt;fixed|versatile|full&gt; &middot;
-        /botteam &lt;on|off&gt; &middot; /kit &lt;sword|axe|web&gt; &middot; /botdiff &lt;bot name&gt; &lt;level&gt; &middot;
+        /botarmor &lt;none|leather|iron|diamond&gt; &middot; /botkit &lt;kit&gt; &middot; /botweapon &lt;fixed|versatile|full&gt; &middot;
+        /botteam &lt;on|off&gt; &middot; /botdiff &lt;bot name&gt; &lt;level&gt; &middot;
         /dummy &lt;0-3&gt; &middot; /atkdummy &lt;0-3&gt;
       </div>
     </div>
@@ -291,11 +266,6 @@
       <label class="checkline"><input type="checkbox" id="botHacksCheck"> Give bots hacks (webs from anywhere, longer reach, more damage, faster hits, hovering)</label>
     </div>
 
-    <div class="panel wide" id="enchantPanel">
-      <h1>Enchantments</h1>
-      <p class="sub">Your gear either way is full diamond armor + every weapon in your kit - these just toggle which enchantments are active on them.</p>
-      <div id="enchantList"></div>
-    </div>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>

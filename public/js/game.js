@@ -36,17 +36,15 @@
         killfeed: el('killfeed'), ammo: el('ammoText'), fps: el('fps'), ping: el('pingText'), viewModeBtn: el('viewModeBtn'),
         chargeWrap: el('chargeWrap'), chargeFill: el('chargeFill'),
         menu: el('menu'), nameInput: el('nameInput'), playBtn: el('playBtn'), botsInput: el('botsInput'),
-        kitSelect: el('kitSelect'), botKitSelect: el('botKitSelect'), arenaSelect: el('arenaSelect'), arrowTipSelect: el('arrowTipSelect'),
+        kitSelect: el('kitSelect'), arenaSelect: el('arenaSelect'),
         botWeaponSelect: el('botWeaponSelect'), botTeamCheck: el('botTeamCheck'), botHacksCheck: el('botHacksCheck'),
         difficultySelect: el('difficultySelect'), armorSelect: el('armorSelect'), dummyCheck: el('dummyCheck'),
         dummyShieldCheck: el('dummyShieldCheck'),
         atkDummyCheck: el('atkDummyCheck'), dmgNumbersCheck: el('dmgNumbersCheck'), resetTerrainBtn: el('resetTerrainBtn'), resetTerrainMsg: el('resetTerrainMsg'),
         inventory: el('inventory'), mainInventory: el('mainInventory'), invHotbar: el('invHotbar'),
         pauseMenu: el('pauseMenu'), resumeBtn: el('resumeBtn'), leaveBtn: el('leaveBtn'),
-        customLoadoutCheck: el('customLoadoutCheck'), customItemsList: el('customItemsList'),
-        netheriteArmorCheck: el('netheriteArmorCheck'), netheriteSwordCheck: el('netheriteSwordCheck'), netheriteAxeCheck: el('netheriteAxeCheck'),
         dogArmorCheck: el('dogArmorCheck'),
-        enchantList: el('enchantList'),
+
         effectsBar: el('effectsBar'),
         trimsBtn: el('trimsBtn'), trimEditor: el('trimEditor'), trimCanvas: el('trimCanvas'),
         trimTabs: el('trimTabs'), trimPalette: el('trimPalette'), trimHint: el('trimHint'),
@@ -108,7 +106,7 @@
       // to the server, indexed everywhere else in this file) is always a
       // logical ITEMS index for whichever item is currently equipped,
       // wherever it happens to physically sit right now.
-      this.kit = 'web';
+      this.kit = MC.DEFAULT_KIT;
       this.hotbarSlots = [];
       this.backpackSlots = [];
 
@@ -122,7 +120,7 @@
      * starts empty. Fewer than 9 items just leaves trailing hotbar slots
      * empty. */
     _initInventorySlots(kitKey, customItemKeys, swordTier, axeTier) {
-      this.kit = MC.KITS[kitKey] ? kitKey : 'web';
+      this.kit = MC.KITS[kitKey] ? kitKey : MC.DEFAULT_KIT;
       let itemKeys = customItemKeys && customItemKeys.length ? customItemKeys : MC.KITS[this.kit].items;
       // netherite_sword/netherite_axe are a tier swap on top of sword/axe
       // (see the menu's checkboxes), not a separate item picked alongside
@@ -147,95 +145,30 @@
       const saved = localStorage.getItem('mc_name');
       if (saved) this.hud.nameInput.value = saved;
       const savedKit = localStorage.getItem('mc_kit');
-      if (savedKit && this.hud.kitSelect) this.hud.kitSelect.value = savedKit;
+      if (savedKit && MC.KITS[savedKit] && this.hud.kitSelect) this.hud.kitSelect.value = savedKit;
       const savedArena = localStorage.getItem('mc_arena');
       if (savedArena && this.hud.arenaSelect) this.hud.arenaSelect.value = savedArena;
-      const savedTip = localStorage.getItem('mc_arrowTip');
-      if (savedTip && this.hud.arrowTipSelect) this.hud.arrowTipSelect.value = savedTip;
       this.hud.playBtn.addEventListener('click', () => this._startFromMenu());
       this.hud.nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') this._startFromMenu(); });
       this.hud.resetTerrainBtn.addEventListener('click', () => this._resetTerrainFromMenu());
-      this._buildCustomItemsMenu();
-      this._buildEnchantMenu();
       this._wireTrimEditor();
-      if (this.hud.kitSelect) this.hud.kitSelect.addEventListener('change', () => this._syncKitLocks());
-      this._syncKitLocks();
-    }
-
-    /** A preset kit locks items, enchantments, armor/weapon tiers and the
-     * arrow tip - grey out every menu option it overrides so it's obvious
-     * they don't apply (the server ignores them either way). */
-    _syncKitLocks() {
-      const kit = MC.KITS[this.hud.kitSelect && this.hud.kitSelect.value];
-      const locked = !!(kit && kit.preset);
-      const controls = [this.hud.customLoadoutCheck, this.hud.netheriteArmorCheck, this.hud.netheriteSwordCheck,
-        this.hud.netheriteAxeCheck, this.hud.arrowTipSelect];
-      if (this.hud.enchantList) controls.push(...this.hud.enchantList.querySelectorAll('input[type=checkbox]'));
-      for (const c of controls) {
-        if (!c) continue;
-        c.disabled = locked;
-        const row = c.closest('label') || c;
-        row.style.opacity = locked ? '0.45' : '';
-      }
-      if (this.hud.customItemsList && locked) this.hud.customItemsList.classList.add('hidden');
-      else if (this.hud.customItemsList && this.hud.customLoadoutCheck) this.hud.customItemsList.classList.toggle('hidden', !this.hud.customLoadoutCheck.checked);
     }
 
     /**
-     * Builds the Enchantments panel straight from MC.ENCHANT_DEFS, grouped
-     * by which slot each enchant applies to - adding a new enchant there is
-     * the only step needed to expose it here too, same auto-updating idea
-     * as the custom item loadout list above.
-     */
-    _buildEnchantMenu() {
-      const list = this.hud.enchantList;
-      if (!list) return;
-      const SLOT_TITLE = { armor: 'Armor', sword: 'Sword', axe: 'Axe', bow: 'Bow', trident: 'Trident', stick: 'Stick', pick: 'Pickaxe', mace: 'Mace' };
-      list.innerHTML = '';
-      for (const slot in MC.ENCHANT_DEFS) {
-        const group = document.createElement('div');
-        group.className = 'enchantgroup';
-        const h3 = document.createElement('h3');
-        h3.textContent = SLOT_TITLE[slot] || slot;
-        group.appendChild(h3);
-        for (const def of MC.ENCHANT_DEFS[slot]) {
-          const label = document.createElement('label');
-          label.className = 'checkline';
-          const box = document.createElement('input');
-          box.type = 'checkbox';
-          box.checked = def.def;
-          box.dataset.slot = slot;
-          box.dataset.key = def.key;
-          label.appendChild(box);
-          label.appendChild(document.createTextNode(' ' + def.name));
-          group.appendChild(label);
-        }
-        list.appendChild(group);
-      }
-    }
-
-    /** Every enchant checkbox's current state, structured as
-     * {slot: {key: bool}} - exactly what the server's mergeEnchantOpts expects. */
-    _enchantOptsFromMenu() {
-      const out = {};
-      if (!this.hud.enchantList) return out;
-      for (const box of this.hud.enchantList.querySelectorAll('input[type=checkbox]')) {
-        (out[box.dataset.slot] || (out[box.dataset.slot] = {}))[box.dataset.key] = box.checked;
-      }
-      return out;
-    }
-
-    /**
-     * The in-match shop. Coins and levels are whatever the server last told
-     * us (see net 'shopState'); clicking Buy only ever sends a request, so
-     * the panel can't talk itself into an upgrade it hasn't been granted.
+     * The legendary shop - a small panel at the side of the view. Coins and
+     * stock are whatever the server last told us (see net 'shopState');
+     * clicking Buy only ever sends a request, so the panel can't talk
+     * itself into an item it hasn't been granted. Not available in duels.
      */
     _toggleShop() {
-      if (!this.me) return;
+      if (!this.me || this.inDuel) return;
       this.shopOpen = !this.shopOpen;
       this.hud.shopPanel.classList.toggle('hidden', !this.shopOpen);
+      clearInterval(this._shopTimer);
       if (this.shopOpen) {
         this._renderShop();
+        // The Luck Potion's countdown ticks while the panel is open.
+        this._shopTimer = setInterval(() => this._renderShop(), 1000);
         document.exitPointerLock && document.exitPointerLock();
       } else {
         this._requestPointerLock();
@@ -392,88 +325,184 @@
       const coins = (this.shop && this.shop.coins) | 0;
       if (this.hud.coinCount) this.hud.coinCount.textContent = coins;
       if (!this.shopOpen || !this.hud.shopList) return;
+      // Don't rebuild under the player's fingers while they're picking from
+      // a dropdown - the once-a-second refresh would snap it shut.
+      if (this.hud.shopList.contains(document.activeElement) && document.activeElement.tagName === 'SELECT') return;
       this.hud.shopCoins.textContent = coins;
-      const levels = (this.shop && this.shop.upgrades) || {};
-      this.hud.shopList.innerHTML = '';
-      const upHeader = document.createElement('div');
-      upHeader.className = 'shopHeader';
-      upHeader.textContent = 'Upgrades';
-      this.hud.shopList.appendChild(upHeader);
-      for (const key of MC.SHOP_KEYS) {
-        const up = MC.SHOP.UPGRADES[key];
-        const level = levels[key] | 0;
-        const cost = MC.shopCost(key, level);
-        const maxed = cost === null;
-
-        const row = document.createElement('div');
-        row.className = 'shopItem' + (maxed ? ' maxed' : '');
+      const stock = (this.shop && this.shop.stock) || {};
+      const mine = this.shop && this.shop.mine;
+      const age = (performance.now() - (this._shopAt || performance.now())) / 1000;
+      this._shopChoice = this._shopChoice || {};
+      const list = this.hud.shopList;
+      list.innerHTML = '';
+      const section = text => { const h = document.createElement('div'); h.className = 'shopSection'; h.textContent = text; list.appendChild(h); };
+      const row = (iconKey, title, descText, status, btnText, disabled, onBuy, extra, cls) => {
+        const r = document.createElement('div');
+        r.className = 'shopItem' + (cls || '');
+        const icon = global.MCTextures.itemIcon(iconKey, 32);
+        icon.className = 'shopIcon';
         const info = document.createElement('div');
         info.className = 'shopInfo';
         const name = document.createElement('div');
         name.className = 'shopName';
-        // Shows what the NEXT level buys, or what the maxed one is worth.
-        const shown = maxed ? MC.shopEffect(key, level) : MC.shopEffect(key, level + 1);
-        name.textContent = up.name + '  (x' + shown.toFixed(2).replace(/0$/, '') + ' ' + up.unit + ')';
-        const desc = document.createElement('div');
-        desc.className = 'shopDesc';
-        desc.textContent = up.desc;
-        const pips = document.createElement('div');
-        pips.className = 'shopPips';
-        for (let i = 0; i < MC.SHOP.MAX_LEVEL; i++) {
-          const pip = document.createElement('div');
-          pip.className = 'shopPip' + (i < level ? ' on' : '');
-          pips.appendChild(pip);
+        name.textContent = title;
+        info.appendChild(name);
+        if (descText) { const d = document.createElement('div'); d.className = 'shopDesc'; d.textContent = descText; info.appendChild(d); }
+        if (status) { const st = document.createElement('div'); st.className = 'shopStatus'; st.textContent = status; info.appendChild(st); }
+        if (extra) info.appendChild(extra);
+        const buy = document.createElement('button');
+        buy.type = 'button';
+        buy.className = 'shopBuy';
+        buy.textContent = btnText;
+        buy.disabled = disabled;
+        buy.addEventListener('click', () => { onBuy(); global.MCSound.click(); });
+        r.appendChild(icon); r.appendChild(info); r.appendChild(buy);
+        list.appendChild(r);
+      };
+
+      section('Legendary');
+      for (const offer of MC.SHOP.LEGENDARY) {
+        if (offer.unlimited) {
+          const has = !!(this.shop && this.shop.soulbound);
+          row('totem', offer.name, offer.desc, has ? 'You have one' : null, has ? 'Owned' : offer.cost + ' coins',
+            has || coins < offer.cost, () => this.net.shopBuy(offer.key), null, has ? ' yours' : '');
+          continue;
         }
-        info.appendChild(name); info.appendChild(desc); info.appendChild(pips);
-
-        const buy = document.createElement('button');
-        buy.type = 'button';
-        buy.className = 'shopBuy';
-        buy.textContent = maxed ? 'Maxed' : cost + ' coins';
-        buy.disabled = maxed || coins < cost;
-        buy.addEventListener('click', () => { this.net.shopBuy(key); global.MCSound.click(); });
-
-        row.appendChild(info); row.appendChild(buy);
-        this.hud.shopList.appendChild(row);
+        const held = stock[offer.key];
+        const yours = !!held && !held.ground && held.owner === mine;
+        let status = null;
+        if (held) {
+          status = held.ground ? 'Lying on the ground somewhere' : yours ? 'Yours' : 'Taken by ' + held.name;
+          if (held.left !== null && held.left !== undefined) {
+            const left = Math.max(0, Math.ceil(held.left - age));
+            status += ' - ' + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + ' left';
+          }
+        }
+        row(offer.item || 'pot_strength', offer.name, offer.desc, status,
+          held ? (yours ? 'Owned' : 'Taken') : offer.cost + ' coins', !!held || coins < offer.cost,
+          () => this.net.shopBuy(offer.key), null, (held ? ' taken' : '') + (yours ? ' yours' : ''));
       }
 
-      // Item bundles (MC.SHOP.ITEMS) - one click buys one bundle, as often
-      // as you can afford it. Weapons are a single unlock.
-      const header = document.createElement('div');
-      header.className = 'shopHeader';
-      header.textContent = 'Items';
-      this.hud.shopList.appendChild(header);
+      section('Items (last until you die)');
       for (const offer of MC.SHOP.ITEMS) {
-        const item = ITEMS.find(i => i.key === offer.item);
-        if (!item) continue;
-        const owned = this._inLoadout(offer.item);
-        const done = !offer.amount && owned;
-
-        const row = document.createElement('div');
-        row.className = 'shopItem' + (done ? ' maxed' : '');
-        const info = document.createElement('div');
-        info.className = 'shopInfo';
-        const name = document.createElement('div');
-        name.className = 'shopName';
-        name.textContent = (offer.name || item.name) + (offer.amount ? '  x' + offer.amount : '');
-        const desc = document.createElement('div');
-        desc.className = 'shopDesc';
-        const pouch = offer.ammo || offer.item;
-        desc.textContent = done ? 'Unlocked'
-          : !owned ? 'Adds it to your loadout for this session'
-          : offer.amount ? 'You have ' + ((this.ammo && this.ammo[pouch]) | 0) : '';
-        info.appendChild(name); info.appendChild(desc);
-
-        const buy = document.createElement('button');
-        buy.type = 'button';
-        buy.className = 'shopBuy';
-        buy.textContent = done ? 'Owned' : offer.cost + ' coins';
-        buy.disabled = done || coins < offer.cost;
-        buy.addEventListener('click', () => { this.net.shopBuyItem(offer.key); global.MCSound.click(); });
-
-        row.appendChild(info); row.appendChild(buy);
-        this.hud.shopList.appendChild(row);
+        let extra = null;
+        if (offer.choices) {
+          extra = document.createElement('select');
+          extra.className = 'shopChoice';
+          for (const c of offer.choices) {
+            const o = document.createElement('option');
+            o.value = c;
+            o.textContent = offer.key === 'tipped' ? MC.ARROW_TIPS[c].name : ITEMS.find(i => i.key === c).name.replace(/^Potion of /, '');
+            extra.appendChild(o);
+          }
+          extra.value = this._shopChoice[offer.key] || offer.choices[0];
+          extra.addEventListener('change', () => { this._shopChoice[offer.key] = extra.value; });
+        }
+        const icon = offer.item || (offer.key === 'potions' ? 'pot_health' : 'bow');
+        row(icon, offer.name, null, null, offer.cost + ' coins', coins < offer.cost,
+          () => this.net.shopBuy(offer.key, offer.choices ? (this._shopChoice[offer.key] || offer.choices[0]) : undefined), extra);
       }
+    }
+
+    /**
+     * Legendary weapons we hold (from the server): each one takes the place
+     * of every ordinary weapon of its kind in the hotbar/backpack - same
+     * spot as the one it replaces, so muscle memory still works.
+     */
+    _applyLegendary(owned) {
+      const prev = this._legendary || new Set();
+      this._legendary = new Set(owned || []);
+      this._replacedBy = this._replacedBy || {};
+      const idxOf = key => ITEMS.findIndex(i => i.key === key);
+      for (const key of this._legendary) {
+        const idx = idxOf(key);
+        const base = MC.baseKey(key);
+        let placed = this.hotbarSlots.includes(idx) || this.backpackSlots.includes(idx);
+        for (const slots of [this.hotbarSlots, this.backpackSlots]) {
+          for (let i = 0; i < slots.length; i++) {
+            const it = slots[i] === null || slots[i] === 'chestplate' ? null : ITEMS[slots[i]];
+            if (!it || it.key === key || MC.baseKey(it.key) !== base) continue;
+            // Remember what it replaced, to give it back if it's lost.
+            if (!it.legendary && this._replacedBy[key] === undefined) this._replacedBy[key] = slots[i];
+            if (this.me && this.me.slot === slots[i]) this.me.slot = idx;
+            slots[i] = placed ? null : idx;
+            placed = true;
+          }
+        }
+        if (!placed) this._addToLoadout(key);
+      }
+      // A legendary we no longer hold (died, dropped, swapped) gives its
+      // slot back to the ordinary weapon it replaced.
+      for (const key of prev) {
+        if (this._legendary.has(key)) continue;
+        const idx = idxOf(key);
+        const back = this._replacedBy[key];
+        delete this._replacedBy[key];
+        const stillOwnedKind = [...this._legendary].some(k => MC.baseKey(k) === MC.baseKey(key));
+        for (const slots of [this.hotbarSlots, this.backpackSlots]) {
+          const i = slots.indexOf(idx);
+          if (i === -1) continue;
+          const restore = back !== undefined && !stillOwnedKind && !this.hotbarSlots.includes(back) && !this.backpackSlots.includes(back);
+          slots[i] = restore ? back : null;
+          if (this.me && this.me.slot === idx) this.me.slot = restore ? back : this.me.slot;
+        }
+      }
+      this._buildHotbar();
+      if (this.inventoryOpen) this._buildInventoryUI();
+      this._renderShop();
+    }
+
+    /** Takes an item out of the hotbar/backpack entirely. */
+    _removeFromLoadout(key) {
+      const idx = ITEMS.findIndex(i => i.key === key);
+      for (const slots of [this.hotbarSlots, this.backpackSlots]) {
+        const i = slots.indexOf(idx);
+        if (i !== -1) slots[i] = null;
+      }
+      if (this.offhand === key) { this.offhand = 'shield'; this._renderOffhandSlot && this._renderOffhandSlot(); }
+      this._buildHotbar();
+      if (this.inventoryOpen) this._buildInventoryUI();
+    }
+
+    /** Q / the inventory's drop slot: throws an item away. */
+    _dropItem(key) {
+      if (!key || !this.me || !this.me.alive || this.inDuel) return;
+      this.net.dropItem(key);
+      global.MCSound.click();
+    }
+
+    /** Legendaries lying on the ground: a floating icon + name over each,
+     * projected to screen space the same way as name tags. */
+    _drawGroundItems() {
+      const layer = document.getElementById('tags');
+      this._groundNodes = this._groundNodes || new Map();
+      const vp = this.renderer.viewProj;
+      const bob = Math.sin(performance.now() / 300) * 0.12;
+      const seen = new Set();
+      for (const g of this.groundItems || []) {
+        seen.add(g.key);
+        let node = this._groundNodes.get(g.key);
+        if (!node) {
+          node = document.createElement('div');
+          node.className = 'grounditem';
+          node.appendChild(global.MCTextures.itemIcon(g.key, 32));
+          const label = document.createElement('span');
+          label.textContent = ITEMS.find(i => i.key === g.key).name;
+          node.appendChild(label);
+          layer.appendChild(node);
+          this._groundNodes.set(g.key, node);
+        }
+        const wy = g.y + 0.9 + bob;
+        const cx4 = vp[0] * g.x + vp[4] * wy + vp[8] * g.z + vp[12];
+        const cy4 = vp[1] * g.x + vp[5] * wy + vp[9] * g.z + vp[13];
+        const cw4 = vp[3] * g.x + vp[7] * wy + vp[11] * g.z + vp[15];
+        if (cw4 <= 0.05 || Math.hypot(g.x - this.me.x, g.z - this.me.z) > 60) { node.style.display = 'none'; continue; }
+        const sx = (cx4 / cw4 * 0.5 + 0.5) * window.innerWidth;
+        const sy = (1 - (cy4 / cw4 * 0.5 + 0.5)) * window.innerHeight;
+        node.style.display = 'flex';
+        node.style.transform = 'translate3d(' + sx + 'px,' + sy + 'px,0) translate(-50%,-100%)';
+      }
+      for (const [key, node] of this._groundNodes) if (!seen.has(key)) { node.remove(); this._groundNodes.delete(key); }
     }
 
     /** The painted grid that belongs to an icon, if any - maps an item
@@ -530,7 +559,8 @@
         const faces = this._trims[slot] || (this._trims[slot] = {});
         return faces[face] || (faces[face] = blank());
       };
-      const tier = () => (hud.netheriteArmorCheck && hud.netheriteArmorCheck.checked) ? 'netherite' : 'diamond';
+      // Preview in whatever armor the chosen kit wears.
+      const tier = () => { const k = MC.KITS[hud.kitSelect && hud.kitSelect.value]; return (k && k.armor) || 'diamond'; };
       const is3D = slot => !!PIECE_BONES[slot];
 
       // ---- the piece's own base texture, sampled per cell so unpainted
@@ -848,49 +878,6 @@
       hud.trimCloseBtn.addEventListener('click', () => hud.trimEditor.classList.add('hidden'));
     }
 
-    /**
-     * Builds the "pick your own items" checklist straight from MC.ITEMS, so
-     * it never needs touching again when a new item is added anywhere in
-     * shared/blocks.js - it just shows up here next time the page loads.
-     * Defaults every box to whatever the Web PvP kit already grants, so
-     * switching into custom mode doesn't dump you with an empty loadout.
-     */
-    _buildCustomItemsMenu() {
-      const list = this.hud.customItemsList;
-      const check = this.hud.customLoadoutCheck;
-      if (!list || !check) return;
-      const defaults = new Set(MC.KITS.web.items);
-      list.innerHTML = '';
-      for (const item of ITEMS) {
-        // Netherite sword/axe aren't independently selectable - they're a
-        // tier swap on the regular sword/axe (see the checkboxes right
-        // below this list), always exactly one of each in a loadout.
-        if (item.key === 'netherite_sword' || item.key === 'netherite_axe') continue;
-        // Elytra is locked behind the admin-only '/elytra' command, not
-        // a normal loadout pick - see net.on('elytraUnlocked', ...) below.
-        if (item.key === 'elytra') continue;
-        const label = document.createElement('label');
-        label.className = 'checkline itemcheck';
-        const box = document.createElement('input');
-        box.type = 'checkbox';
-        box.value = item.key;
-        box.checked = defaults.has(item.key);
-        label.appendChild(box);
-        label.appendChild(document.createTextNode(' ' + item.name));
-        list.appendChild(label);
-      }
-      const toggle = () => list.classList.toggle('hidden', !check.checked);
-      check.addEventListener('change', toggle);
-      toggle();
-    }
-
-    /** Every item key currently checked in the custom loadout list, or null
-     * if custom mode isn't on (falls back to the kit dropdown as before). */
-    _customItemsFromMenu() {
-      if (!this.hud.customLoadoutCheck || !this.hud.customLoadoutCheck.checked) return null;
-      return [...this.hud.customItemsList.querySelectorAll('input[type=checkbox]:checked')].map(b => b.value);
-    }
-
     async _resetTerrainFromMenu() {
       const btn = this.hud.resetTerrainBtn, msg = this.hud.resetTerrainMsg;
       btn.disabled = true;
@@ -921,16 +908,15 @@
     _startFromMenu() {
       const name = (this.hud.nameInput.value || 'Player').trim().slice(0, 16) || 'Player';
       localStorage.setItem('mc_name', name);
-      const kit = this.hud.kitSelect ? this.hud.kitSelect.value : 'web';
+      const kit = this.hud.kitSelect && MC.KITS[this.hud.kitSelect.value] ? this.hud.kitSelect.value : MC.DEFAULT_KIT;
       localStorage.setItem('mc_kit', kit);
       this.selfName = name;
-      // A preset kit locks the loadout and enchantments (see _syncKitLocks).
-      const presetKit = !!(MC.KITS[kit] && MC.KITS[kit].preset);
-      const customItems = presetKit ? null : this._customItemsFromMenu();
-      const enchantOpts = presetKit ? MC.defaultEnchantOpts() : this._enchantOptsFromMenu();
-      const armor = this.hud.netheriteArmorCheck && this.hud.netheriteArmorCheck.checked ? 'netherite' : 'diamond';
-      const swordTier = this.hud.netheriteSwordCheck && this.hud.netheriteSwordCheck.checked ? 'netherite' : 'diamond';
-      const axeTier = this.hud.netheriteAxeCheck && this.hud.netheriteAxeCheck.checked ? 'netherite' : 'diamond';
+      // Every kit fixes its items and enchantments.
+      const customItems = null;
+      const enchantOpts = MC.defaultEnchantOpts();
+      // Every kit sets its own armor/weapon tiers and arrow tip - these are
+      // just what kitGear falls back to where a kit doesn't say.
+      const armor = 'diamond', swordTier = 'diamond', axeTier = 'diamond';
       const dogArmor = !!(this.hud.dogArmorCheck && this.hud.dogArmorCheck.checked);
       // Trims are edited from their own panel (see _wireTrimEditor), not
       // this menu form - they're read straight from localStorage here so
@@ -939,8 +925,7 @@
       const trims = loadTrims();
       const arena = this.hud.arenaSelect ? this.hud.arenaSelect.value : 'classic';
       localStorage.setItem('mc_arena', arena);
-      const arrowTip = this.hud.arrowTipSelect ? this.hud.arrowTipSelect.value : 'none';
-      localStorage.setItem('mc_arrowTip', arrowTip);
+      const arrowTip = 'none';
       // A preset kit decides its own armor/sword/axe/arrow tip, whatever the
       // menu says - the server applies the same MC.kitGear() rule, this just
       // keeps our own hotbar and armor icons in step with it.
@@ -999,7 +984,15 @@
       this.mySkin = null;
       // Shop state is owned by the server (see its 'shopBuy' handler); this
       // is just the last snapshot it sent us.
-      this.shop = init.shop || { coins: 0, upgrades: MC.freshUpgrades() };
+      this.shop = init.shop || { coins: 0, stock: {}, mine: null };
+      this._shopAt = performance.now();
+      this._legendary = new Set();
+      this._replacedBy = {};
+      this._extraKeys = new Set();
+      this._droppedKeys = new Set();
+      this.groundItems = [];
+      if (this._groundNodes) { for (const n of this._groundNodes.values()) n.remove(); this._groundNodes.clear(); }
+      this.hud.shopBtn.classList.toggle('hidden', !!(room && room.ns));
       this.shopOpen = false;
       this.hud.shopPanel.classList.add('hidden');
       this._renderShop();
@@ -1065,7 +1058,7 @@
       const requestedBots = parseInt(this.hud.botsInput.value, 10);
       const difficulty = this.hud.difficultySelect ? this.hud.difficultySelect.value : 'normal';
       const botArmor = this.hud.armorSelect ? this.hud.armorSelect.value : 'diamond';
-      const botKit = this.hud.botKitSelect ? this.hud.botKitSelect.value : 'web';
+      const botKit = MC.botKit(this.kit);
       const botWeapon = this.hud.botWeaponSelect ? this.hud.botWeaponSelect.value : 'fixed';
       if (requestedBots >= 0) this.net.chat('/bots ' + Math.max(0, Math.min(16, requestedBots)) + ' ' + difficulty + ' ' + botArmor + ' ' + botKit + ' ' + botWeapon);
       this.net.chat('/botteam ' + (this.hud.botTeamCheck && this.hud.botTeamCheck.checked ? 'on' : 'off'));
@@ -1127,7 +1120,7 @@
 
       this.me = null;
       this.world = null;
-      if (this.shopOpen) { this.shopOpen = false; this.hud.shopPanel.classList.add('hidden'); }
+      if (this.shopOpen) { this.shopOpen = false; this.hud.shopPanel.classList.add('hidden'); clearInterval(this._shopTimer); }
       if (this.duelOpen) { this.duelOpen = false; this.hud.duelPanel.classList.add('hidden'); }
       this.hud.duelInvite.classList.add('hidden');
     }
@@ -1214,6 +1207,11 @@
         this.shieldStunUntil = 0;
         this.deadUntilRespawn = false;
         if (d.ammo) { this.ammo = d.ammo; this._updateAmmoUI(); }
+        // A new life: this-life-only extras go, dropped kit items come back.
+        for (const k of this._extraKeys || []) this._removeFromLoadout(k);
+        for (const k of this._droppedKeys || []) this._addToLoadout(k);
+        this._extraKeys = new Set();
+        this._droppedKeys = new Set();
         this.hud.deathScreen.classList.add('hidden');
         this._updateHealthUI();
         this._requestPointerLock();
@@ -1290,7 +1288,23 @@
       net.on('duelReturn', () => this._switchRoom(null));
       // Same thing for an item bought from the shop that wasn't in the
       // loadout yet.
-      net.on('itemUnlocked', d => { this._addToLoadout(d.key); this._renderShop(); });
+      net.on('legendary', d => this._applyLegendary(d.owned));
+      // Items bought or /give'd for this life, and items dropped - both
+      // undone at respawn (see 'respawn' below).
+      net.on('itemUnlocked', d => {
+        this._extraKeys = this._extraKeys || new Set();
+        this._droppedKeys = this._droppedKeys || new Set();
+        if (this._droppedKeys.delete(d.key)) { this._addToLoadout(d.key); return; }
+        this._extraKeys.add(d.key);
+        this._addToLoadout(d.key);
+      });
+      net.on('itemRemoved', d => {
+        this._extraKeys = this._extraKeys || new Set();
+        this._droppedKeys = this._droppedKeys || new Set();
+        if (!this._extraKeys.delete(d.key)) this._droppedKeys.add(d.key);
+        this._removeFromLoadout(d.key);
+      });
+      net.on('groundItems', list => { this.groundItems = list || []; });
       net.on('death', d => {
         if (d.victim === this.me.id) this._onSelfDeath(d);
         else { const r = this.remote.get(d.victim); if (r) r.alive = false; }
@@ -1319,7 +1333,7 @@
         this.creepers.delete(d.id);
         if (this._tags) { const tag = this._tags.get(d.id); if (tag) { tag.node.remove(); this._tags.delete(d.id); } }
       });
-      net.on('shopState', st => { this.shop = st; this._renderShop(); });
+      net.on('shopState', st => { this.shop = st; this._shopAt = performance.now(); this._renderShop(); });
       net.on('disconnected', reason => {
         // This only ever fires for an unexpected drop (a deliberate leave-
         // to-menu goes through Net.disconnect(), which strips this listener
@@ -1430,6 +1444,12 @@
         if (e.code === 'KeyB' && !this.duelOpen) { e.preventDefault(); this._toggleShop(); return; }
         if (this.shopOpen) { if (e.code === 'Escape') this._toggleShop(); return; }
         if (e.code === 'KeyG' && !this.inDuel) { e.preventDefault(); this._toggleDuel(); return; }
+        if (e.code === 'KeyV' && this._legendary && this._legendary.has('sea_trident')) { this.net.summonRain(); return; }
+        if (e.code === 'KeyQ' && !this.inventoryOpen) {
+          const held = ITEMS[this.me.slot];
+          if (held && this.hotbarSlots.includes(this.me.slot)) this._dropItem(held.key);
+          return;
+        }
         if (this.duelOpen) { if (e.code === 'Escape') this._toggleDuel(); return; }
         if (this.inventoryOpen) {
           if (e.code === 'Escape') this._toggleInventory();
@@ -1481,6 +1501,21 @@
       this.hud.leaveBtn.addEventListener('click', () => this._leaveToMenu());
       this.hud.viewModeBtn.addEventListener('click', () => this._cyclePerspective());
       this.hud.shopBtn.addEventListener('click', () => this._toggleShop());
+      const dropSlot = document.getElementById('invDropSlot');
+      if (dropSlot) {
+        dropSlot.addEventListener('dragover', e => { e.preventDefault(); dropSlot.classList.add('dragover'); });
+        dropSlot.addEventListener('dragleave', () => dropSlot.classList.remove('dragover'));
+        dropSlot.addEventListener('drop', e => {
+          e.preventDefault();
+          dropSlot.classList.remove('dragover');
+          const raw = e.dataTransfer.getData('text/plain') || '';
+          const m = /^(hotbar|backpack|main|inv\w*):(\d+)$/.exec(raw);
+          if (!m) return;
+          const arr = this._slotArray(m[1]);
+          const idx = arr && arr[+m[2]];
+          if (typeof idx === 'number') this._dropItem(ITEMS[idx].key);
+        });
+      }
       this.hud.duelBtn.addEventListener('click', () => this._toggleDuel());
       this.hud.duelCloseBtn.addEventListener('click', () => this._toggleDuel());
       this.hud.duelSendBtn.addEventListener('click', () => this._sendDuelRequest());
@@ -1672,7 +1707,7 @@
           const count = document.createElement('div');
           count.className = 'count';
           if (item.ammo !== undefined) count.textContent = this.ammo ? this.ammo[item.key] : item.ammo;
-          else if (item.key === 'bow' || item.key === 'crossbow') count.textContent = this.ammo ? this.ammo.arrow : '';
+          else if (item.type === 'bow' || item.type === 'crossbow') count.textContent = this.ammo ? this.ammo.arrow + (this.ammo.tipped_arrow | 0) : '';
           cell.appendChild(count);
           cell.title = item.name + ' (drag to move)';
         }
@@ -1879,7 +1914,7 @@
       }
       // A sword hit against a charged respawn anchor detonates it early -
       // same forgiving block targeting as the crystal above.
-      if (item.key === 'sword' || item.key === 'netherite_sword' || item.key === 'iron_sword') {
+      if (MC.baseKey(item.key) === 'sword') {
         const exactAnchor = (pick && pick.type === 'block' && pick.block.block === ID.RESPAWN_ANCHOR && pick.dist <= C.REACH_ATTACK) ? pick.block : null;
         const anchor = exactAnchor || this._findNearbyBlock(ID.RESPAWN_ANCHOR, C.REACH_ATTACK);
         if (anchor) {
@@ -1897,7 +1932,7 @@
           // _onLeftUp / C.SPEAR_CHARGE_HOLD.
           const targets = this._pickAttackTargets(item);
           this._tryAttackMulti(targets, item);
-          if (item.key === 'spear') this._spearChargeStart = performance.now();
+          if (MC.baseKey(item.key) === 'spear') this._spearChargeStart = performance.now();
           return;
         } else {
           const target = this._pickAttackTarget();
@@ -1921,7 +1956,7 @@
       this._spearChargeStart = null;
       if (!start || !this.me || !this.me.alive) return;
       const item = ITEMS[this.me.slot];
-      if (item.key !== 'spear') return;
+      if (MC.baseKey(item.key) !== 'spear') return;
       const held = (performance.now() - start) / 1000;
       if (held < C.SPEAR_CHARGE_HOLD) return;
       const chargedReach = Object.assign({}, item, { reach: (item.reach || C.REACH_ATTACK) + C.SPEAR_CHARGE_REACH_BONUS });
@@ -1932,6 +1967,8 @@
     _onRightDown() {
       if (!this.me || !this.me.alive) return;
       const item = ITEMS[this.me.slot];
+      if (MC.baseKey(item.key) === 'spear') { this._spearChargeStart = performance.now(); return; }
+      if (item.key === 'void_mace') { this.net.voidPull(); this._swingLocal(); return; }
       if (item.type === 'pearl') {
         if (this.ammo.pearl <= 0) return;
         const dir = this._lookDir();
@@ -2071,6 +2108,7 @@
     _onRightUp() {
       if (!this.me) return;
       const item = ITEMS[this.me.slot];
+      if (MC.baseKey(item.key) === 'spear') { this._onLeftUp(); return; }
       if (item.type === 'bow' || item.type === 'crossbow') {
         const held = (performance.now() - this.rightDownAt) / 1000;
         // Shift+RMB with a crossbow out fires a firework rocket instead of
@@ -2082,11 +2120,12 @@
           this.net.shoot(dir[0], dir[1], dir[2], 1, true);
           this.ammo.firework--; this._updateAmmoUI();
           this._swingLocal();
-        } else if (!fireworkMode && this.ammo.arrow > 0 && held > 0.08) {
+        } else if (!fireworkMode && (this.ammo.arrow > 0 || this.ammo.tipped_arrow > 0) && held > 0.08) {
           const power = clamp(held / item.drawTime, 0.12, 1);
           const dir = this._lookDir();
           this.net.shoot(dir[0], dir[1], dir[2], power);
-          this.ammo.arrow--; this._updateAmmoUI();
+          if (this.ammo.tipped_arrow > 0) this.ammo.tipped_arrow--; else this.ammo.arrow--;
+          this._updateAmmoUI();
           this._swingLocal();
         }
         this.hud.chargeWrap.classList.add('hidden');
@@ -2444,7 +2483,8 @@
       // hand busy already).
       const item = ITEMS[this.me.slot];
       const shieldStunned = performance.now() < (this.shieldStunUntil || 0);
-      this.me.blocking = !inv && !shieldStunned && this.mouseDown.right && (item.type === 'weapon' || item.type === 'tool');
+      const rightIsAbility = MC.baseKey(item.key) === 'spear' || item.key === 'void_mace';
+      this.me.blocking = !inv && !shieldStunned && this.mouseDown.right && !rightIsAbility && (item.type === 'weapon' || item.type === 'tool');
       this.me.sneak = sneak && !jump;
       this.me.sprint = sprint && forward > 0 && !this.me.blocking;
 
@@ -2460,7 +2500,6 @@
       // Swiftness, bought from the shop - multiplies whatever the potions
       // worked out to, so it stacks with Speed and is still blunted by
       // Slowness rather than cancelling it.
-      speedMult *= MC.shopEffect('speed', this.shop && this.shop.upgrades && this.shop.upgrades.speed);
       // Slow Falling (tipped arrow): lighter gravity, and the server waives
       // the fall damage separately - see its trackFall check.
       const slowFall = this.activeEffects.slowFalling;
@@ -2567,7 +2606,7 @@
           this.hud.chargeWrap.classList.add('hidden');
         }
         if ((item.type === 'bow' || item.type === 'crossbow') && Math.floor(held * 10) !== this._lastDrawTick) { this._lastDrawTick = Math.floor(held * 10); }
-      } else if (this.mouseDown.left && item.key === 'spear' && this._spearChargeStart) {
+      } else if ((this.mouseDown.left || this.mouseDown.right) && MC.baseKey(item.key) === 'spear' && this._spearChargeStart) {
         const held = (nowMs - this._spearChargeStart) / 1000;
         const frac = clamp(held / C.SPEAR_CHARGE_HOLD, 0, 1);
         this.hud.chargeWrap.classList.remove('hidden');
@@ -2920,7 +2959,7 @@
           const count = document.createElement('div');
           count.className = 'count';
           if (item.ammo !== undefined) count.textContent = this.ammo ? this.ammo[item.key] : item.ammo;
-          else if (item.key === 'bow' || item.key === 'crossbow') count.textContent = this.ammo ? this.ammo.arrow : '';
+          else if (item.type === 'bow' || item.type === 'crossbow') count.textContent = this.ammo ? this.ammo.arrow + (this.ammo.tipped_arrow | 0) : '';
           cell.appendChild(count);
         }
         const label = document.createElement('div');
@@ -3179,6 +3218,7 @@
         this._drawNameTag(c);
       }
       if (this._damageNumbers && this._damageNumbers.length) this._drawDamageNumbers();
+      if ((this.groundItems && this.groundItems.length) || (this._groundNodes && this._groundNodes.size)) this._drawGroundItems();
 
       // projectiles
       for (const pr of this.projectiles.values()) {
@@ -3459,7 +3499,7 @@
   function ammoLabel(slot, ammo) {
     const item = ITEMS[slot];
     if (!ammo) return '';
-    if (item.type === 'bow' || item.type === 'crossbow') return 'Arrows: ' + ammo.arrow;
+    if (item.type === 'bow' || item.type === 'crossbow') return 'Arrows: ' + ammo.arrow + ((ammo.tipped_arrow | 0) > 0 ? ' + ' + ammo.tipped_arrow + ' tipped' : '');
     if (item.type === 'pearl') return 'Pearls: ' + ammo.pearl;
     if (item.type === 'food') return item.name + ': ' + ammo[item.key];
     if (item.type === 'windcharge') return 'Wind Charges: ' + ammo.windcharge;
