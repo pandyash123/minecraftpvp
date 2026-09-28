@@ -3487,12 +3487,17 @@
         if (!p.skin) p.skin = r.getSkin(p.name);
         const heldItem = ITEMS[p.slot || 0];
         const pose = poseFor(p.walkPhase || 0, p.swingT, heldItem, p.blocking);
-        // Invisibility: body, armor and held item are all skipped - the
-        // held item hangs off the arm bone drawPlayer() stashes, so drawing
-        // it without the body would pin it to whoever was drawn last.
-        // The nametag deliberately still shows, same as vanilla, so an
-        // invisible player can still be picked out at close range.
-        if (p.invisible) { this._drawNameTag(p); continue; }
+        // Invisibility hides the body and held item but not the armor - same
+        // as vanilla, a floating suit of armor gives an invisible player
+        // away (the armor layer is posed on its own, so it doesn't need the
+        // body drawn). The held item has to go too: it hangs off the arm
+        // bone drawPlayer() stashes, so drawing it without the body would
+        // pin it to whoever was drawn last. The nametag still shows.
+        if (p.invisible) {
+          r.drawArmorLayer(p.armor, p.x, p.y, p.z, p.yaw, pose, p.trims);
+          this._drawNameTag(p);
+          continue;
+        }
         r.drawPlayer(p.skin, p.x, p.y, p.z, p.yaw, pose, [1, 1, 1], 1);
         // Real inflated armor geometry worn over the body (see
         // MCEntities.armorParts), not a tint on the skin - drawn as a
