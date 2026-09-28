@@ -327,8 +327,10 @@ function createGame(io, opts) {
     // build - see _initInventorySlots), never both at once: whichever one a
     // kit/custom loadout would normally grant, the player's tier preference
     // decides which single variant they actually have.
-    if (key === 'sword') return p.swordTier !== 'netherite' && hasBaseItem(p, 'sword');
+    // Custom loadouts can also pick an iron sword as their sword tier.
+    if (key === 'sword') return p.swordTier === 'diamond' && hasBaseItem(p, 'sword');
     if (key === 'netherite_sword') return p.swordTier === 'netherite' && hasBaseItem(p, 'sword');
+    if (key === 'iron_sword') return (p.swordTier === 'iron' && hasBaseItem(p, 'sword')) || hasBaseItem(p, 'iron_sword');
     if (key === 'axe') return p.axeTier !== 'netherite' && hasBaseItem(p, 'axe');
     if (key === 'netherite_axe') return p.axeTier === 'netherite' && hasBaseItem(p, 'axe');
     // Elytra is locked behind the admin-only '/elytra' command (see /admin257; not in
@@ -391,14 +393,14 @@ function createGame(io, opts) {
     // loadout, no enchant toggles, just MC.defaultEnchantOpts().
     const preset = !isBot && MC.KITS[kit] && MC.KITS[kit].preset;
     const custom = !isBot && !preset && Array.isArray(customItems) && customItems.length
-      ? new Set(customItems.filter(k => ITEM_BY_KEY[k]))
+      ? new Set(customItems.filter(k => ITEM_BY_KEY[k] && !ITEM_BY_KEY[k].legendary && k !== 'elytra'))
       : null;
     // A preset kit (MC.KITS[..].preset) fixes armor/sword/axe/arrow tip
     // regardless of the menu - see MC.kitGear. The menu itself only ever
     // offers diamond or netherite, so anything else has to come from a kit.
     const gear = isBot ? null : MC.kitGear(MC.KITS[kit] ? kit : MC.DEFAULT_KIT, {
-      armor: armorTier === 'netherite' ? 'netherite' : 'diamond',
-      swordTier: swordTier === 'netherite' ? 'netherite' : 'diamond',
+      armor: MC.ARMOR_TIERS[armorTier] ? armorTier : 'diamond',
+      swordTier: swordTier === 'netherite' || swordTier === 'iron' ? swordTier : 'diamond',
       axeTier: axeTier === 'netherite' ? 'netherite' : 'diamond',
       arrowTip: MC.arrowTipKey(arrowTip)
     }, !!custom);
@@ -416,7 +418,7 @@ function createGame(io, opts) {
       armorTier: isBot ? (MC.ARMOR_TIERS[armorTier] ? armorTier : defaultBotArmor) : (MC.ARMOR_TIERS[gear.armor] ? gear.armor : 'diamond'),
       // Same idea as armorTier, but for the sword/axe slot specifically -
       // human-only (bots always get the plain version); see playerHasItem().
-      swordTier: !isBot && gear.swordTier === 'netherite' ? 'netherite' : 'diamond',
+      swordTier: !isBot && (gear.swordTier === 'netherite' || gear.swordTier === 'iron') ? gear.swordTier : 'diamond',
       axeTier: !isBot && gear.axeTier === 'netherite' ? 'netherite' : 'diamond',
       // Decided once at join (the menu's "Give wolves armor" checkbox) -
       // every wolf this player's eggs spawn gets it or doesn't, see spawnWolf().

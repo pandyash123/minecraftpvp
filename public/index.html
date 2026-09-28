@@ -50,6 +50,7 @@
     <div class="panel">
       <h1>Paused</h1>
       <button id="resumeBtn">Resume</button>
+      <button id="pauseControlsBtn" class="secondary">Controls</button>
       <button id="leaveBtn" class="secondary">Leave to Menu</button>
     </div>
   </div>
@@ -168,6 +169,18 @@
 
   <div id="duelBanner" class="hidden"></div>
 
+  <div id="controlsPanel" class="hidden">
+    <div class="panel controlspanel">
+      <h1>Controls</h1>
+      <p class="sub">Click a binding, then press any key or mouse button. Backspace clears it. Esc always pauses and closes menus.</p>
+      <div id="controlsList"></div>
+      <div class="controlsBtns">
+        <button type="button" id="controlsResetBtn" class="secondary">Reset to defaults</button>
+        <button type="button" id="controlsCloseBtn">Done</button>
+      </div>
+    </div>
+  </div>
+
   <div id="deathScreen" class="hidden">
     <div class="panel">
       <h1>YOU DIED</h1>
@@ -200,8 +213,46 @@
           <option value="duel">Sword Duel - diamond, sword and gapples only</option>
           <option value="uhc" selected>Modern UHC - diamond, buckets, cobwebs</option>
           <option value="archer">Wind Charge Archer - chainmail, bows, wind charges</option>
+          <option value="custom">Custom - pick your own items, armor and enchantments</option>
       </select>
-      <p class="sub">Every kit comes with its own armor, weapons and enchantments. Bots use your kit too.</p>
+      <p class="sub">Every kit comes with its own armor, weapons and enchantments (except Custom). Bots use your kit too.</p>
+      <div id="customLoadout" class="hidden customloadout">
+        <label>Armor</label>
+        <select id="customArmor">
+          <option value="none">None</option>
+          <option value="leather">Leather</option>
+          <option value="chainmail">Chainmail</option>
+          <option value="iron">Iron</option>
+          <option value="diamond" selected>Diamond</option>
+          <option value="netherite">Netherite (knockback/fall/blast resistance)</option>
+        </select>
+        <label>Sword</label>
+        <select id="customSword">
+          <option value="iron">Iron</option>
+          <option value="diamond" selected>Diamond</option>
+          <option value="netherite">Netherite</option>
+        </select>
+        <label>Axe</label>
+        <select id="customAxe">
+          <option value="diamond" selected>Iron</option>
+          <option value="netherite">Netherite</option>
+        </select>
+        <label>Tipped arrows</label>
+        <select id="customArrowTip">
+          <option value="none" selected>Normal - no effect</option>
+          <option value="poison">Poison - heaviest damage over time, but never kills</option>
+          <option value="harming">Instant Harming - extra damage the moment it lands</option>
+          <option value="wither">Wither - damage over time that can finish someone off</option>
+          <option value="slowness">Slowness - cripples their movement speed</option>
+          <option value="slowfall">Slow Falling - floats them down, no fall damage</option>
+          <option value="weakness">Weakness - weakens the melee damage they deal</option>
+        </select>
+        <label>Items</label>
+        <div id="customItemsList" class="itemchecklist"></div>
+        <label>Enchantments</label>
+        <div id="enchantList"></div>
+        <button type="button" id="customResetBtn" class="secondary">Reset custom loadout</button>
+      </div>
       <label>Arena</label>
       <select id="arenaSelect">
         <option value="classic" selected>Ruined Keep - grass, trees and a terraced pyramid</option>
@@ -237,11 +288,12 @@
       <label class="checkline"><input type="checkbox" id="atkDummyCheck"> Add an attacking dummy (fixed facing, fights back with whatever weapon last hit it)</label>
       <label class="checkline"><input type="checkbox" id="dmgNumbersCheck"> Show damage numbers when your weapon lands a hit</label>
       <button id="playBtn">Play</button>
+      <button id="controlsBtn" type="button" class="secondary">Controls</button>
       <button id="trimsBtn" type="button" class="secondary">Customize Armor &amp; Shield Trims</button>
       <button id="resetTerrainBtn" type="button" class="secondary">Reset Terrain</button>
       <div id="resetTerrainMsg" class="hidden"></div>
       <div class="controls">
-        <b>Controls</b> &mdash; WASD move &middot; Space jump &middot; Shift sneak &middot; Ctrl/R sprint &middot;
+        <b>Controls</b> (the defaults - rebind any of them with the Controls button) &mdash; WASD move &middot; Space jump &middot; Shift sneak &middot; Ctrl/R sprint &middot;
         Left click attack / mine (hold left or right click with the spear to charge a stronger thrust) &middot; Right click place / shoot / throw a potion (splashes on impact, hold for bow &amp; apple) &middot;
         hold Right click with sword/pickaxe/axe to raise your shield (blocks what's in front of you, but not hits from well above or below) &middot;
         the axe hits harder, and its first hit through a raised shield still gets blocked but disables that shield for 3s &middot;

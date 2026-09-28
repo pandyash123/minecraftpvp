@@ -399,7 +399,20 @@
   // exist for that player: its hotbar slot renders empty and using it is a
   // no-op both client and server side.
   var KITS = {
-    // Every kit is a fixed preset: the items, armor tier, sword/axe tier,
+    // Custom: the one kit that isn't a preset - the menu lets you pick the
+    // items, armor, sword/axe tier, arrow tip and enchantments yourself.
+    // `items` here is the starting selection (the old "everything" loadout),
+    // and what bots use when they match a Custom player.
+    custom: {
+      key: 'custom', name: 'Custom',
+      items: ['sword', 'bow', 'pearl', 'gapple', 'pick', 'cobble', 'planks', 'cobweb', 'axe', 'mace', 'spear', 'windcharge',
+        'obsidian', 'pot_strength', 'pot_speed', 'pot_fireres', 'pot_turtle', 'pot_health', 'pot_invis',
+        'crossbow', 'trident', 'stick', 'egap',
+        'water_bucket', 'lava_bucket', 'tnt', 'tnt_minecart', 'rail', 'flint_steel',
+        'powder_snow_bucket', 'totem', 'firework',
+        'end_crystal', 'respawn_anchor', 'glowstone', 'wolf_spawn_egg', 'creeper_spawn_egg']
+    },
+    // Every other kit is a fixed preset: the items, armor tier, sword/axe tier,
     // arrow tip and enchantments (MC.defaultEnchantOpts) all come with it -
     // nothing is picked separately. See kitGear(). Item counts come from
     // freshAmmo. The shield is always in the offhand, so it isn't listed.

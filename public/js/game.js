@@ -24,6 +24,78 @@
 
   const el = id => document.getElementById(id);
 
+  // -------------------------------------------------------------- controls --
+  // Every rebindable action, in the order the Controls screen lists them,
+  // each with up to two bindings. A binding is a KeyboardEvent.code
+  // ('KeyW', 'ShiftLeft', 'Digit1'...) or 'Mouse<button>' for a mouse
+  // button (Mouse0 left, Mouse1 middle, Mouse2 right, Mouse3/4 side).
+  // Escape isn't rebindable: it always pauses and closes menus.
+  const CONTROLS = [
+    { group: 'Movement' },
+    { action: 'forward', label: 'Walk forward', keys: ['KeyW'] },
+    { action: 'back', label: 'Walk back', keys: ['KeyS'] },
+    { action: 'left', label: 'Strafe left', keys: ['KeyA'] },
+    { action: 'right', label: 'Strafe right', keys: ['KeyD'] },
+    { action: 'jump', label: 'Jump / swim up', keys: ['Space'] },
+    { action: 'sneak', label: 'Sneak', keys: ['ShiftLeft'] },
+    { action: 'sprint', label: 'Sprint', keys: ['KeyR', 'CapsLock'] },
+    { group: 'Combat' },
+    { action: 'attack', label: 'Attack / mine', keys: ['Mouse0'] },
+    { action: 'use', label: 'Use / place / block', keys: ['Mouse2'] },
+    { action: 'drop', label: 'Drop held item', keys: ['KeyQ'] },
+    { action: 'rain', label: 'Summon rain (Trident of the Sea)', keys: ['KeyV'] },
+    { group: 'Menus' },
+    { action: 'inventory', label: 'Inventory', keys: ['KeyE'] },
+    { action: 'shop', label: 'Shop', keys: ['KeyB'] },
+    { action: 'duel', label: 'Duel', keys: ['KeyG'] },
+    { action: 'chat', label: 'Chat', keys: ['KeyT', 'Enter'] },
+    { action: 'camera', label: 'Change camera view', keys: ['F5'] },
+    { group: 'Hotbar' },
+    { action: 'slot1', label: 'Hotbar slot 1', keys: ['Digit1'] },
+    { action: 'slot2', label: 'Hotbar slot 2', keys: ['Digit2'] },
+    { action: 'slot3', label: 'Hotbar slot 3', keys: ['Digit3'] },
+    { action: 'slot4', label: 'Hotbar slot 4', keys: ['Digit4'] },
+    { action: 'slot5', label: 'Hotbar slot 5', keys: ['Digit5'] },
+    { action: 'slot6', label: 'Hotbar slot 6', keys: ['Digit6'] },
+    { action: 'slot7', label: 'Hotbar slot 7', keys: ['Digit7'] },
+    { action: 'slot8', label: 'Hotbar slot 8', keys: ['Digit8'] },
+    { action: 'slot9', label: 'Hotbar slot 9', keys: ['Digit9'] }
+  ];
+  const CONTROLS_KEY = 'mc_controls';
+
+  function defaultBindings() {
+    const out = {};
+    for (const c of CONTROLS) if (c.action) out[c.action] = [c.keys[0] || null, c.keys[1] || null];
+    return out;
+  }
+  /** Saved bindings over the defaults - an action missing from an older
+   * save just gets its default. */
+  function loadBindings() {
+    const out = defaultBindings();
+    try {
+      const saved = JSON.parse(localStorage.getItem(CONTROLS_KEY) || 'null');
+      if (saved) for (const a in out) if (Array.isArray(saved[a])) out[a] = [saved[a][0] || null, saved[a][1] || null];
+    } catch (e) { /* storage blocked or corrupt - defaults */ }
+    return out;
+  }
+  function saveBindings(b) {
+    try { localStorage.setItem(CONTROLS_KEY, JSON.stringify(b)); } catch (e) { /* private window - lasts this page only */ }
+  }
+  /** A binding as a person would say it: 'KeyW' -> 'W', 'Mouse2' -> 'Right Click'. */
+  function codeLabel(code) {
+    if (!code) return '-';
+    const mouse = { Mouse0: 'Left Click', Mouse1: 'Middle Click', Mouse2: 'Right Click', Mouse3: 'Mouse Back', Mouse4: 'Mouse Forward' };
+    if (mouse[code]) return mouse[code];
+    if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+    if (/^Digit\d$/.test(code)) return code.slice(5);
+    if (/^Numpad/.test(code)) return 'Num ' + code.slice(6);
+    const named = { ShiftLeft: 'Left Shift', ShiftRight: 'Right Shift', ControlLeft: 'Left Ctrl', ControlRight: 'Right Ctrl',
+      AltLeft: 'Left Alt', AltRight: 'Right Alt', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+      CapsLock: 'Caps Lock', Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\',
+      Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/' };
+    return named[code] || code;
+  }
+
   class Game {
     constructor() {
       this.canvas = el('view');
@@ -32,6 +104,9 @@
         hotbar: el('hotbar'), scoreboard: el('scoreboardBody'),
         chatLog: el('chatLog'), chatInput: el('chatInput'),
         deathScreen: el('deathScreen'), deathText: el('deathText'), respawnTimer: el('respawnTimer'),
+        controlsPanel: el('controlsPanel'), controlsList: el('controlsList'),
+        customLoadout: el('customLoadout'), customItemsList: el('customItemsList'), enchantList: el('enchantList'),
+        customArmor: el('customArmor'), customSword: el('customSword'), customAxe: el('customAxe'), customArrowTip: el('customArrowTip'),
         crosshair: el('crosshair'), hint: el('hint'), loading: el('loading'), loadingBar: el('loadingBar'),
         killfeed: el('killfeed'), ammo: el('ammoText'), fps: el('fps'), ping: el('pingText'), viewModeBtn: el('viewModeBtn'),
         chargeWrap: el('chargeWrap'), chargeFill: el('chargeFill'),
@@ -79,6 +154,8 @@
       this._damageNumbers = [];     // {x,y,z,node,born} - floating hit numbers, see _spawnDamageNumber()
 
       this.keys = {};
+      this.bindings = loadBindings();
+      this._indexBindings();
       this.mouseDown = { left: false, right: false };
       this.rightDownAt = 0;
       this.pointerLocked = false;
@@ -126,6 +203,7 @@
       // (see the menu's checkboxes), not a separate item picked alongside
       // them - swap the key in place so the hotbar only ever shows one.
       if (swordTier === 'netherite') itemKeys = itemKeys.map(k => k === 'sword' ? 'netherite_sword' : k);
+      if (swordTier === 'iron') itemKeys = itemKeys.map(k => k === 'sword' ? 'iron_sword' : k);
       if (axeTier === 'netherite') itemKeys = itemKeys.map(k => k === 'axe' ? 'netherite_axe' : k);
       const indices = itemKeys.map(key => ITEMS.findIndex(i => i.key === key)).filter(idx => idx !== -1);
       this.hotbarSlots = new Array(9).fill(null);
@@ -152,6 +230,10 @@
       this.hud.nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') this._startFromMenu(); });
       this.hud.resetTerrainBtn.addEventListener('click', () => this._resetTerrainFromMenu());
       this._wireTrimEditor();
+      this._buildCustomLoadout();
+      // The Controls screen works from the menu too, before any game starts.
+      this._wireControlsPanel();
+      this._renderKeyHints();
     }
 
     /**
@@ -560,7 +642,12 @@
         return faces[face] || (faces[face] = blank());
       };
       // Preview in whatever armor the chosen kit wears.
-      const tier = () => { const k = MC.KITS[hud.kitSelect && hud.kitSelect.value]; return (k && k.armor) || 'diamond'; };
+      const tier = () => {
+        const key = hud.kitSelect && hud.kitSelect.value;
+        if (key === 'custom') return hud.customArmor.value === 'none' ? 'diamond' : hud.customArmor.value;
+        const k = MC.KITS[key];
+        return (k && k.armor) || 'diamond';
+      };
       const is3D = slot => !!PIECE_BONES[slot];
 
       // ---- the piece's own base texture, sampled per cell so unpainted
@@ -912,11 +999,16 @@
       localStorage.setItem('mc_kit', kit);
       this.selfName = name;
       // Every kit fixes its items and enchantments.
-      const customItems = null;
-      const enchantOpts = MC.defaultEnchantOpts();
+      // Only the Custom kit lets you pick; every other kit is fixed.
+      const custom = kit === 'custom' ? this._readCustomLoadout() : null;
+      if (custom) this._saveCustomLoadout(custom);
+      const customItems = custom ? custom.items : null;
+      const enchantOpts = custom ? custom.enchants : MC.defaultEnchantOpts();
       // Every kit sets its own armor/weapon tiers and arrow tip - these are
       // just what kitGear falls back to where a kit doesn't say.
-      const armor = 'diamond', swordTier = 'diamond', axeTier = 'diamond';
+      const armor = custom ? custom.armor : 'diamond';
+      const swordTier = custom ? custom.sword : 'diamond';
+      const axeTier = custom ? custom.axe : 'diamond';
       const dogArmor = !!(this.hud.dogArmorCheck && this.hud.dogArmorCheck.checked);
       // Trims are edited from their own panel (see _wireTrimEditor), not
       // this menu form - they're read straight from localStorage here so
@@ -925,7 +1017,7 @@
       const trims = loadTrims();
       const arena = this.hud.arenaSelect ? this.hud.arenaSelect.value : 'classic';
       localStorage.setItem('mc_arena', arena);
-      const arrowTip = 'none';
+      const arrowTip = custom ? custom.arrowTip : 'none';
       // A preset kit decides its own armor/sword/axe/arrow tip, whatever the
       // menu says - the server applies the same MC.kitGear() rule, this just
       // keeps our own hotbar and armor icons in step with it.
@@ -1436,40 +1528,11 @@
           else if (e.key === 'Escape') this._closeChat();
           return;
         }
+        if (this._listening) return; // the Controls screen is waiting for a key
         if (!this.me) return; // no session running (at the menu, or between sessions)
-        if (e.code === 'KeyE' && this.me.alive) { e.preventDefault(); this._toggleInventory(); return; }
-        // Same three-way camera cycle as vanilla Minecraft's F5 - block the
-        // browser's own "refresh page" default or every press would reload.
-        if (e.code === 'F5') { e.preventDefault(); this._cyclePerspective(); return; }
-        if (e.code === 'KeyB' && !this.duelOpen) { e.preventDefault(); this._toggleShop(); return; }
-        if (this.shopOpen) { if (e.code === 'Escape') this._toggleShop(); return; }
-        if (e.code === 'KeyG' && !this.inDuel) { e.preventDefault(); this._toggleDuel(); return; }
-        if (e.code === 'KeyV' && this._legendary && this._legendary.has('sea_trident')) { this.net.summonRain(); return; }
-        if (e.code === 'KeyQ' && !this.inventoryOpen) {
-          const held = ITEMS[this.me.slot];
-          if (held && this.hotbarSlots.includes(this.me.slot)) this._dropItem(held.key);
-          return;
-        }
-        if (this.duelOpen) { if (e.code === 'Escape') this._toggleDuel(); return; }
-        if (this.inventoryOpen) {
-          if (e.code === 'Escape') this._toggleInventory();
-          return; // swallow movement/hotbar keys while browsing the inventory
-        }
-        this.keys[e.code] = true;
-        if (e.code === 'Enter' || e.code === 'KeyT') { e.preventDefault(); this._openChat(); }
-        if (e.code === 'Escape') {
-          // A second Escape (pointer already released) opens the pause menu
-          // instead of doing nothing - pressing it again resumes.
-          if (this.hud.pauseMenu.classList.contains('hidden')) document.exitPointerLock && document.exitPointerLock();
-          else this._requestPointerLock();
-        }
-        const num = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3, Digit5: 4, Digit6: 5, Digit7: 6, Digit8: 7, Digit9: 8 };
-        if (num[e.code] !== undefined) {
-          const idx = this.hotbarSlots[num[e.code]];
-          if (idx !== null && idx !== undefined) this._selectSlot(idx);
-        }
+        this._press(e.code, e);
       });
-      window.addEventListener('keyup', e => { this.keys[e.code] = false; });
+      window.addEventListener('keyup', e => { this._release(e.code); });
       window.addEventListener('wheel', e => {
         if (document.activeElement === this.hud.chatInput || !this.me) return;
         const dir = e.deltaY > 0 ? 1 : -1;
@@ -1532,17 +1595,266 @@
         while (this.yaw > Math.PI) this.yaw -= TAU;
         while (this.yaw < -Math.PI) this.yaw += TAU;
       });
+      // Mouse buttons are just more bindable "keys" (Mouse0, Mouse2...).
       document.addEventListener('mousedown', e => {
-        if (!this.pointerLocked) return;
-        if (e.button === 0) { this.mouseDown.left = true; this._onLeftDown(); }
-        if (e.button === 2) { this.mouseDown.right = true; this.rightDownAt = performance.now(); this._ateThisHold = false; this._onRightDown(); }
+        if (!this.pointerLocked || this._listening || !this.me) return;
+        this._press('Mouse' + e.button, e);
       });
       document.addEventListener('mouseup', e => {
-        if (e.button === 0) { this.mouseDown.left = false; this._onLeftUp(); }
-        if (e.button === 2) { this.mouseDown.right = false; this._onRightUp(); }
+        if (this._listening) return;
+        this._release('Mouse' + e.button, e);
       });
       this.canvas.addEventListener('contextmenu', e => e.preventDefault());
-      window.addEventListener('blur', () => { this.mouseDown.left = this.mouseDown.right = false; this._spearChargeStart = null; });
+      window.addEventListener('blur', () => { this.keys = {}; this.mouseDown.left = this.mouseDown.right = false; this._spearChargeStart = null; });
+    }
+
+    /** code -> the actions bound to it. */
+    _indexBindings() {
+      this._codeActions = {};
+      for (const action in this.bindings) {
+        for (const code of this.bindings[action]) {
+          if (code) (this._codeActions[code] = this._codeActions[code] || []).push(action);
+        }
+      }
+    }
+    /** True while any key/button bound to `action` is held. */
+    _held(action) {
+      const b = this.bindings[action];
+      return !!b && b.some(code => code && this.keys[code]);
+    }
+
+    /** A key or mouse button went down: run whatever it's bound to. */
+    _press(code, e) {
+      const acts = this._codeActions[code] || [];
+      const is = a => acts.includes(a);
+      // Our own shortcuts win over the browser's (F5 reload, Space scroll...).
+      if (acts.length && e) e.preventDefault();
+      const repeat = !!(e && e.repeat);
+      if (code === 'Escape') {
+        if (this.shopOpen) { this._toggleShop(); return; }
+        if (this.duelOpen) { this._toggleDuel(); return; }
+        if (this.inventoryOpen) { this._toggleInventory(); return; }
+        // A second Escape (pointer already released) opens the pause menu
+        // instead of doing nothing - pressing it again resumes.
+        if (this.hud.pauseMenu.classList.contains('hidden')) document.exitPointerLock && document.exitPointerLock();
+        else this._requestPointerLock();
+        return;
+      }
+      if (repeat) return; // held keys don't re-trigger toggles, swings or throws
+      if (is('inventory') && this.me.alive) { this._toggleInventory(); return; }
+      if (is('camera')) { this._cyclePerspective(); return; }
+      if (is('shop') && !this.duelOpen) { this._toggleShop(); return; }
+      if (this.shopOpen) return;
+      if (is('duel') && !this.inDuel) { this._toggleDuel(); return; }
+      if (is('rain') && this._legendary && this._legendary.has('sea_trident')) this.net.summonRain();
+      if (is('drop') && !this.inventoryOpen) {
+        const held = ITEMS[this.me.slot];
+        if (held && this.hotbarSlots.includes(this.me.slot)) this._dropItem(held.key);
+      }
+      if (this.duelOpen || this.inventoryOpen) return; // swallow movement/hotbar keys while a menu is up
+      this.keys[code] = true;
+      if (is('chat')) { this._openChat(); return; }
+      for (let i = 1; i <= 9; i++) {
+        if (!is('slot' + i)) continue;
+        const idx = this.hotbarSlots[i - 1];
+        if (idx !== null && idx !== undefined) this._selectSlot(idx);
+      }
+      if (!this.pointerLocked) return;
+      if (is('attack') && !this.mouseDown.left) { this.mouseDown.left = true; this._onLeftDown(); }
+      if (is('use') && !this.mouseDown.right) {
+        this.mouseDown.right = true; this.rightDownAt = performance.now(); this._ateThisHold = false; this._onRightDown();
+      }
+    }
+
+    /** A key or mouse button came back up. Attack/use only let go once no
+     * other key bound to them is still held. */
+    _release(code, e) {
+      this.keys[code] = false;
+      const acts = this._codeActions[code] || [];
+      if (acts.length && e && code.startsWith('Mouse')) e.preventDefault();
+      if (acts.includes('attack') && this.mouseDown.left && !this._held('attack')) { this.mouseDown.left = false; this._onLeftUp(); }
+      if (acts.includes('use') && this.mouseDown.right && !this._held('use')) { this.mouseDown.right = false; this._onRightUp(); }
+    }
+
+    // ------------------------------------------------------ custom loadout --
+    /**
+     * The Custom kit's picker: armor, sword/axe tier, arrow tip, an item
+     * checklist built straight from MC.ITEMS and the enchant toggles from
+     * MC.ENCHANT_DEFS (so new items/enchants turn up here on their own).
+     * Starts from KITS.custom + the default enchants, or whatever was
+     * picked last time (kept in this browser).
+     */
+    _buildCustomLoadout() {
+      const hud = this.hud;
+      if (!hud.customLoadout) return;
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem('mc_customLoadout') || 'null'); } catch (e) { /* ignore */ }
+      this._fillCustomLoadout(saved);
+      const sync = () => hud.customLoadout.classList.toggle('hidden', hud.kitSelect.value !== 'custom');
+      hud.kitSelect.addEventListener('change', sync);
+      sync();
+      el('customResetBtn').addEventListener('click', () => this._fillCustomLoadout(null));
+    }
+
+    _fillCustomLoadout(saved) {
+      const hud = this.hud;
+      const pick = (sel, v) => { if (v && [...sel.options].some(o => o.value === v)) sel.value = v; };
+      hud.customArmor.value = 'diamond'; hud.customSword.value = 'diamond'; hud.customAxe.value = 'diamond'; hud.customArrowTip.value = 'none';
+      if (saved) { pick(hud.customArmor, saved.armor); pick(hud.customSword, saved.sword); pick(hud.customAxe, saved.axe); pick(hud.customArrowTip, saved.arrowTip); }
+      const chosen = new Set(saved && Array.isArray(saved.items) ? saved.items : MC.KITS.custom.items);
+      hud.customItemsList.innerHTML = '';
+      for (const item of ITEMS) {
+        // Weapon tiers are the Sword/Axe dropdowns, not separate items; the
+        // elytra is admin-only, legendaries come from the shop, and cooked
+        // beef belongs to the archer kit.
+        if (/^(netherite_sword|netherite_axe|iron_sword|elytra|beef)$/.test(item.key) || item.legendary) continue;
+        const label = document.createElement('label');
+        label.className = 'checkline itemcheck';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.value = item.key;
+        box.checked = chosen.has(item.key);
+        label.appendChild(box);
+        label.appendChild(document.createTextNode(' ' + item.name));
+        hud.customItemsList.appendChild(label);
+      }
+      const SLOT_TITLE = { armor: 'Armor', sword: 'Sword', axe: 'Axe', bow: 'Bow', trident: 'Trident', stick: 'Stick', pick: 'Pickaxe', mace: 'Mace' };
+      const ench = MC.defaultEnchantOpts();
+      if (saved && saved.enchants) for (const s in ench) for (const k in ench[s]) if (saved.enchants[s] && typeof saved.enchants[s][k] === 'boolean') ench[s][k] = saved.enchants[s][k];
+      hud.enchantList.innerHTML = '';
+      for (const slot in MC.ENCHANT_DEFS) {
+        const group = document.createElement('div');
+        group.className = 'enchantgroup';
+        const h3 = document.createElement('h3');
+        h3.textContent = SLOT_TITLE[slot] || slot;
+        group.appendChild(h3);
+        for (const def of MC.ENCHANT_DEFS[slot]) {
+          const label = document.createElement('label');
+          label.className = 'checkline';
+          const box = document.createElement('input');
+          box.type = 'checkbox';
+          box.checked = ench[slot][def.key];
+          box.dataset.slot = slot;
+          box.dataset.key = def.key;
+          label.appendChild(box);
+          label.appendChild(document.createTextNode(' ' + def.name));
+          group.appendChild(label);
+        }
+        hud.enchantList.appendChild(group);
+      }
+    }
+
+    /** Everything picked in the Custom kit panel. */
+    _readCustomLoadout() {
+      const hud = this.hud;
+      const enchants = {};
+      for (const box of hud.enchantList.querySelectorAll('input[type=checkbox]')) {
+        (enchants[box.dataset.slot] || (enchants[box.dataset.slot] = {}))[box.dataset.key] = box.checked;
+      }
+      return {
+        armor: hud.customArmor.value, sword: hud.customSword.value, axe: hud.customAxe.value, arrowTip: hud.customArrowTip.value,
+        items: [...hud.customItemsList.querySelectorAll('input[type=checkbox]:checked')].map(b => b.value),
+        enchants
+      };
+    }
+    _saveCustomLoadout(c) {
+      try { localStorage.setItem('mc_customLoadout', JSON.stringify(c)); } catch (e) { /* private window */ }
+    }
+
+    // ----------------------------------------------------- controls screen --
+    _wireControlsPanel() {
+      const open = () => this._openControls();
+      el('controlsBtn').addEventListener('click', open);
+      el('pauseControlsBtn').addEventListener('click', open);
+      el('controlsCloseBtn').addEventListener('click', () => this._closeControls());
+      el('controlsResetBtn').addEventListener('click', () => {
+        this.bindings = defaultBindings();
+        this._bindingsChanged();
+      });
+      // Waiting for a new binding: take the very next key or mouse button.
+      // Capture phase, so nothing else in the game sees it.
+      const take = (code, ev) => {
+        if (!this._listening) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const { action, i } = this._listening;
+        this._listening = null;
+        if (code === 'Escape') { this._renderControls(); return; }
+        if (code === 'Backspace' || code === 'Delete') { this.bindings[action][i] = null; this._bindingsChanged(); return; }
+        // One key, one job: take it off whatever else had it.
+        for (const a in this.bindings) this.bindings[a] = this.bindings[a].map(c => c === code ? null : c);
+        this.bindings[action][i] = code;
+        this._bindingsChanged();
+      };
+      window.addEventListener('keydown', e => take(e.code, e), true);
+      window.addEventListener('mousedown', e => { if (this._listening && !e.target.closest('.listening')) take('Mouse' + e.button, e); }, true);
+      window.addEventListener('mouseup', e => { if (this._listening && e.button > 0) take('Mouse' + e.button, e); }, true);
+      window.addEventListener('contextmenu', e => { if (this._listening || !this.hud.controlsPanel.classList.contains('hidden')) e.preventDefault(); }, true);
+    }
+
+    _openControls() {
+      this.hud.controlsPanel.classList.remove('hidden');
+      document.exitPointerLock && document.exitPointerLock();
+      this._renderControls();
+    }
+    _closeControls() {
+      this._listening = null;
+      this.hud.controlsPanel.classList.add('hidden');
+    }
+
+    _bindingsChanged() {
+      saveBindings(this.bindings);
+      this._indexBindings();
+      this.keys = {};
+      this._renderControls();
+      this._renderKeyHints();
+      if (this.me) this._buildHotbar();
+    }
+
+    _renderControls() {
+      const list = this.hud.controlsList;
+      list.innerHTML = '';
+      for (const c of CONTROLS) {
+        if (c.group) {
+          const h = document.createElement('div');
+          h.className = 'controlGroup';
+          h.textContent = c.group;
+          list.appendChild(h);
+          continue;
+        }
+        const row = document.createElement('div');
+        row.className = 'controlRow';
+        const name = document.createElement('div');
+        name.className = 'controlName';
+        name.textContent = c.label;
+        row.appendChild(name);
+        for (let i = 0; i < 2; i++) {
+          const code = this.bindings[c.action][i];
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          const listening = this._listening && this._listening.action === c.action && this._listening.i === i;
+          btn.className = (listening ? 'listening' : '') + (code ? '' : ' empty');
+          btn.textContent = listening ? 'Press a key...' : codeLabel(code);
+          // Start listening on click (not mousedown), so the click that
+          // pressed this button doesn't bind itself as "Left Click".
+          btn.addEventListener('click', () => { this._listening = { action: c.action, i }; this._renderControls(); });
+          row.appendChild(btn);
+        }
+        list.appendChild(row);
+      }
+    }
+
+    /** Anywhere the HUD names a key, name the one actually bound. */
+    _renderKeyHints() {
+      const k = a => codeLabel(this.bindings[a][0] || this.bindings[a][1]);
+      const move = [k('forward'), k('left'), k('back'), k('right')].join('');
+      this.hud.hint.textContent = 'Click to look around · ' + (move.length === 4 ? move : k('forward') + '/' + k('left') + '/' + k('back') + '/' + k('right')) +
+        ' move · ' + k('jump') + ' jump · ' + k('attack') + ' attack/mine · ' + k('use') + ' use/place/block · ' +
+        k('inventory') + ' inventory · ' + k('shop') + ' shop · ' + k('duel') + ' duel · ' + k('drop') + ' drop item · ' +
+        k('chat') + ' chat · Esc pause';
+      this.hud.shopBtn.title = 'Open the shop (' + k('shop') + ')';
+      this.hud.duelBtn.title = 'Challenge someone to a duel (' + k('duel') + ')';
+      const drop = document.querySelector('#invDropSlot .slotlabel');
+      if (drop) drop.textContent = 'Drop (' + k('drop') + ')';
     }
 
     _requestPointerLock() {
@@ -2468,14 +2780,14 @@
       // right after a lunge lets its own momentum coast/decay instead of
       // being fought, so it actually reads as a dash.
       const lunging = performance.now() < (this._lungeLockUntil || 0);
-      const forward = (inv || lunging) ? 0 : (this.keys.KeyW ? 1 : 0) - (this.keys.KeyS ? 1 : 0);
-      const strafe = (inv || lunging) ? 0 : (this.keys.KeyD ? 1 : 0) - (this.keys.KeyA ? 1 : 0);
-      const sneak = !inv && !!this.keys.ShiftLeft;
+      const forward = (inv || lunging) ? 0 : (this._held('forward') ? 1 : 0) - (this._held('back') ? 1 : 0);
+      const strafe = (inv || lunging) ? 0 : (this._held('right') ? 1 : 0) - (this._held('left') ? 1 : 0);
+      const sneak = !inv && this._held('sneak');
       // ControlLeft used to also trigger sprint, but holding it with W to
       // sprint-forward is literally the browser's "close tab" shortcut -
       // dropped it in favor of purely safe keys.
-      const sprint = !inv && (!!this.keys.KeyR || !!this.keys.CapsLock);
-      const jump = !inv && !!this.keys.Space;
+      const sprint = !inv && this._held('sprint');
+      const jump = !inv && this._held('jump');
       this.me.yaw = this.yaw; this.me.pitch = this.pitch;
       // A raised shield takes both hands like in vanilla - no sprinting
       // while blocking, and only sword/pick have a free off-hand to block
@@ -2964,7 +3276,8 @@
         }
         const label = document.createElement('div');
         label.className = 'key';
-        label.textContent = pos + 1;
+        const slotKey = this.bindings['slot' + (pos + 1)];
+        label.textContent = slotKey ? codeLabel(slotKey[0] || slotKey[1]).replace(/^Num /, '') : pos + 1;
         cell.appendChild(label);
         this.hud.hotbar.appendChild(cell);
       });

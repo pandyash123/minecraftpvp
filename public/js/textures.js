@@ -1009,16 +1009,17 @@
       g.fillStyle = '#4caf50';
       g.beginPath(); g.ellipse(S * 0.62, S * 0.2, S * 0.14, S * 0.07, -0.5, 0, 6.29); g.fill();
     } else if (key === 'helmet' || key === 'chestplate' || key === 'leggings' || key === 'boots') {
-      // Diamond's cyan palette, or netherite's near-black / chainmail's
-      // grey one (matching the 3D armor layer's ARMOR_COLORS/ARMOR_FLECKS)
-      // if that tier was passed in.
-      const netheriteArmor = tier === 'netherite';
-      const chain = tier === 'chainmail';
-      const main = netheriteArmor ? '#221f24' : chain ? '#8a8e96' : '#6fd8d4';
-      const shadow = netheriteArmor ? '#17161a' : chain ? '#6c7078' : '#57c2be';
-      const trim = netheriteArmor ? '#0d0c0f' : chain ? '#4a4d54' : '#3fa9a6';
-      const shade = netheriteArmor ? '#0c0b0d' : chain ? '#2e3036' : '#173230';
-      const highlight = netheriteArmor ? '#6a5a52' : chain ? '#c4c8ce' : '#c8fef9';
+      // The worn tier's colours (matching the 3D armor layer's
+      // ARMOR_COLORS/ARMOR_FLECKS), as [main, shadow, trim, shade,
+      // highlight] - diamond's cyan if no tier was passed in.
+      const PAL = {
+        netherite: ['#221f24', '#17161a', '#0d0c0f', '#0c0b0d', '#6a5a52'],
+        chainmail: ['#8a8e96', '#6c7078', '#4a4d54', '#2e3036', '#c4c8ce'],
+        iron: ['#d3d5d8', '#b4b7bb', '#8e9196', '#4d4f53', '#ffffff'],
+        leather: ['#8a5a2e', '#6e4622', '#553518', '#2e1c0c', '#c9915a']
+      };
+      const pal = PAL[tier] || ['#6fd8d4', '#57c2be', '#3fa9a6', '#173230', '#c8fef9'];
+      const main = pal[0], shadow = pal[1], trim = pal[2], shade = pal[3], highlight = pal[4];
       if (key === 'helmet') {
         P(4, 2, 8, 3, main);
         P(3, 5, 10, 3, shadow);
