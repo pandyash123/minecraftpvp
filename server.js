@@ -26,7 +26,6 @@ const PORT = process.env.PORT || 3000;
 const SEED = process.env.SEED ? parseInt(process.env.SEED, 10) : 20260726;
 const BOT_COUNT = process.env.BOTS !== undefined ? parseInt(process.env.BOTS, 10) : 4;
 const TICK_HZ = 30;
-const SNAPSHOT_HZ = 20;
 
 // ------------------------------------------------------------------ game ---
 /**
@@ -2243,7 +2242,6 @@ function createGame(io, opts) {
 
   // ------------------------------------------------------------- game loop ---
   let lastTick = Date.now();
-  let snapAccum = 0;
   let spreadAccum = 0;
 
   function tick() {
@@ -2446,11 +2444,12 @@ function createGame(io, opts) {
 
     stepProjectiles(dt);
 
-    snapAccum += dt;
-    if (snapAccum >= 1 / SNAPSHOT_HZ) {
-      snapAccum = 0;
-      sendSnapshot();
-    }
+    // Every tick, so other players move smoothly. This used to be throttled
+    // to a 20Hz target by zeroing an accumulator, which threw away the
+    // leftover time: at a 30Hz tick it only ever fired on every other tick
+    // (15/s in an uneven 33/66ms rhythm), and less still whenever ticks ran
+    // late - the "laggy" look. A snapshot is cheap to build and send.
+    sendSnapshot();
   }
 
   function sendSnapshot() {
