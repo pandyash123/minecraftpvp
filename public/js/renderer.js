@@ -577,11 +577,13 @@
       gl.uniform3fv(this.progEntity.u.uTint, [1, 1, 1]);
     }
 
-    drawWolf(x, y, z, yaw, hasArmor, pose) {
+    /** `tint` (optional, an RGB multiplier) recolours the whole animal -
+     * the Blood Sword's minion is a blood-red wolf. */
+    drawWolf(x, y, z, yaw, hasArmor, pose, tint) {
       const gl = this.gl;
       gl.useProgram(this.progEntity);
       gl.uniformMatrix4fv(this.progEntity.u.uVP, false, this.viewProj);
-      gl.uniform3fv(this.progEntity.u.uTint, [1, 1, 1]);
+      gl.uniform3fv(this.progEntity.u.uTint, tint || [1, 1, 1]);
       gl.uniform1f(this.progEntity.u.uAlpha, 1);
       gl.enable(gl.CULL_FACE);
       gl.cullFace(gl.BACK);

@@ -12,14 +12,14 @@
     strength: 'Strength', speed: 'Speed', slowness: 'Slowness', resistance: 'Resistance',
     fireResistance: 'Fire Resistance', regeneration: 'Regeneration',
     // Tipped-arrow effects (see MC.ARROW_TIPS).
-    poison: 'Poison', wither: 'Wither', weakness: 'Weakness', slowFalling: 'Slow Falling',
+    poison: 'Poison', wither: 'Wither', weakness: 'Weakness', slowFalling: 'Slow Falling', bleed: 'Bleeding',
     invisibility: 'Invisibility'
   };
   const ROMAN = ['', 'I', 'II', 'III', 'IV', 'V', 'VI'];
   // Which potion's icon represents each active-effect kind in the HUD -
   // Slowness/Resistance both come from Turtle Master, the only potion that
   // grants either.
-  const EFFECT_ICON_KEY = { strength: 'pot_strength', speed: 'pot_speed', slowness: 'pot_turtle', resistance: 'pot_turtle', fireResistance: 'pot_fireres' };
+  const EFFECT_ICON_KEY = { strength: 'pot_strength', speed: 'pot_speed', slowness: 'pot_turtle', resistance: 'pot_turtle', fireResistance: 'pot_fireres', bleed: 'blood_sword' };
 
 
   const el = id => document.getElementById(id);
@@ -44,6 +44,7 @@
     { action: 'use', label: 'Use / place / block', keys: ['Mouse2'] },
     { action: 'drop', label: 'Drop held item', keys: ['KeyQ'] },
     { action: 'rain', label: 'Summon rain (Trident of the Sea)', keys: ['KeyV'] },
+    { action: 'ability', label: 'Weapon ability (Blood Minion / Big Blast)', keys: ['KeyF'] },
     { group: 'Menus' },
     { action: 'inventory', label: 'Inventory', keys: ['KeyE'] },
     { action: 'shop', label: 'Shop', keys: ['KeyB'] },
@@ -460,7 +461,11 @@
             status += ' - ' + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + ' left';
           }
         }
-        row(offer.item || 'pot_strength', offer.name, offer.desc, status,
+        const perks = MC.SHOP.LEVELED[offer.key];
+        const lvl = yours && perks ? this._lvl(offer.key) : -1;
+        const desc = perks ? offer.desc + ' ' + perks.map((p, i) => 'Lv' + i + ': ' + p).join(' · ') : offer.desc;
+        if (lvl >= 0) status = 'Yours - level ' + lvl;
+        row(offer.item || 'pot_strength', offer.name, desc, status,
           held ? (yours ? 'Owned' : 'Taken') : offer.cost + ' coins', !!held || coins < offer.cost,
           () => this.net.shopBuy(offer.key), null, (held ? ' taken' : '') + (yours ? ' yours' : ''));
       }
@@ -532,6 +537,60 @@
       this._buildHotbar();
       if (this.inventoryOpen) this._buildInventoryUI();
       this._renderShop();
+    }
+
+    /** Level of a leveling legendary we hold (0-3), or -1 if we don't. */
+    _lvl(key) {
+      if (!this._legendary || !this._legendary.has(key)) return -1;
+      return MC.weaponLevel(this._weaponKills && this._weaponKills[key]);
+    }
+
+    /**
+     * Top-of-screen chips for the legendaries we hold: their level (and
+     * what the next kill unlocks), the key for their special move, and its
+     * cooldown counting down. Rebuilt a few times a second.
+     */
+    _renderAbilityBar() {
+      const bar = this._abilityBar || (this._abilityBar = el('abilityBar'));
+      if (!bar) return;
+      const owned = this._legendary || new Set();
+      const key = a => codeLabel((this.bindings[a] && (this.bindings[a][0] || this.bindings[a][1])) || null);
+      const cd = name => {
+        const left = ((this._cooldowns && this._cooldowns[name]) || 0) - performance.now();
+        return left > 0 ? '<span class="cooling">' + Math.ceil(left / 1000) + 's</span>' : '<span class="ready">ready</span>';
+      };
+      const ability = { blood_sword: [2, 'ability', 'Blood Minion', 'minion'], explosion_crossbow: [1, 'ability', 'Big Blast', 'bigblast'],
+        sea_trident: [0, 'rain', 'Summon rain', 'rain'], void_mace: [0, 'use', 'Void pull', 'pull'],
+        speed_spear: [0, 'attack', 'Charged thrust (hold)', null] };
+      const chips = [];
+      for (const k of owned) {
+        const lv = MC.SHOP.LEVELED[k] ? this._lvl(k) : -1;
+        const a = ability[k];
+        if (lv < 0 && !a) continue;
+        let html = '';
+        if (lv >= 0) {
+          html += '<b>Lv ' + lv + '</b>';
+          if (lv < MC.SHOP.MAX_WEAPON_LEVEL) html += ' <span class="dim">next kill: ' + escapeHtml(MC.SHOP.LEVELED[k][lv + 1]) + '</span>';
+        }
+        if (a) {
+          if (lv >= 0 && lv < a[0]) html += ' <span class="dim">' + escapeHtml(a[2]) + ' at Lv ' + a[0] + '</span>';
+          else html += ' [' + escapeHtml(key(a[1])) + '] ' + escapeHtml(a[2]) + (a[3] ? ' ' + cd(a[3]) : '');
+        }
+        chips.push({ k, html });
+      }
+      const sig = chips.map(c => c.k + c.html).join('|');
+      if (sig === this._abilitySig) return;
+      this._abilitySig = sig;
+      bar.innerHTML = '';
+      for (const c of chips) {
+        const chip = document.createElement('div');
+        chip.className = 'abilitychip';
+        chip.appendChild(global.MCTextures.itemIcon(c.k, 22));
+        const text = document.createElement('span');
+        text.innerHTML = c.html;
+        chip.appendChild(text);
+        bar.appendChild(chip);
+      }
     }
 
     /** Takes an item out of the hotbar/backpack entirely. */
@@ -1079,6 +1138,8 @@
       this.shop = init.shop || { coins: 0, stock: {}, mine: null };
       this._shopAt = performance.now();
       this._legendary = new Set();
+      this._weaponKills = {};
+      this._cooldowns = {};
       this._replacedBy = {};
       this._extraKeys = new Set();
       this._droppedKeys = new Set();
@@ -1300,9 +1361,11 @@
         this.deadUntilRespawn = false;
         if (d.ammo) { this.ammo = d.ammo; this._updateAmmoUI(); }
         // A new life: this-life-only extras go, dropped kit items come back.
-        for (const k of this._extraKeys || []) this._removeFromLoadout(k);
+        // ...except any the server kept (totems carry over a death).
+        const keep = new Set(d.extras || []);
+        for (const k of this._extraKeys || []) if (!keep.has(k)) this._removeFromLoadout(k);
         for (const k of this._droppedKeys || []) this._addToLoadout(k);
-        this._extraKeys = new Set();
+        this._extraKeys = new Set(keep);
         this._droppedKeys = new Set();
         this.hud.deathScreen.classList.add('hidden');
         this._updateHealthUI();
@@ -1380,7 +1443,8 @@
       net.on('duelReturn', () => this._switchRoom(null));
       // Same thing for an item bought from the shop that wasn't in the
       // loadout yet.
-      net.on('legendary', d => this._applyLegendary(d.owned));
+      net.on('legendary', d => { this._weaponKills = d.kills || {}; this._applyLegendary(d.owned); });
+      net.on('abilityCooldown', d => { this._cooldowns = this._cooldowns || {}; this._cooldowns[d.ability] = performance.now() + d.seconds * 1000; });
       // Items bought or /give'd for this life, and items dropped - both
       // undone at respawn (see 'respawn' below).
       net.on('itemUnlocked', d => {
@@ -1647,6 +1711,7 @@
       if (this.shopOpen) return;
       if (is('duel') && !this.inDuel) { this._toggleDuel(); return; }
       if (is('rain') && this._legendary && this._legendary.has('sea_trident')) this.net.summonRain();
+      if (is('ability') && !this.inventoryOpen && !this.duelOpen) this.net.ability();
       if (is('drop') && !this.inventoryOpen) {
         const held = ITEMS[this.me.slot];
         if (held && this.hotbarSlots.includes(this.me.slot)) this._dropItem(held.key);
@@ -2433,7 +2498,7 @@
           this.ammo.firework--; this._updateAmmoUI();
           this._swingLocal();
         } else if (!fireworkMode && (this.ammo.arrow > 0 || this.ammo.tipped_arrow > 0) && held > 0.08) {
-          const power = clamp(held / item.drawTime, 0.12, 1);
+          const power = clamp(held / MC.weaponDrawTime(item, this._lvl(item.key)), 0.12, 1);
           const dir = this._lookDir();
           this.net.shoot(dir[0], dir[1], dir[2], power);
           if (this.ammo.tipped_arrow > 0) this.ammo.tipped_arrow--; else this.ammo.arrow--;
@@ -2500,7 +2565,7 @@
 
     _tryAttack(entity) {
       const item = ITEMS[this.me.slot];
-      const cd = (item.cooldown || 0.35) * 1000;
+      const cd = (MC.weaponCooldown(item, this._lvl(item.key)) || 0.35) * 1000;
       const t = performance.now();
       if (t - this.lastAttackClient < cd) return;
       this.lastAttackClient = t;
@@ -2511,7 +2576,7 @@
     /** Spear-only: every landed jab pierces every valid target in front of
      * it, not just the nearest one - so pick all of them, closest first. */
     _tryAttackMulti(targets, item) {
-      const cd = (item.cooldown || 0.35) * 1000;
+      const cd = (MC.weaponCooldown(item, this._lvl(item.key)) || 0.35) * 1000;
       const t = performance.now();
       if (t - this.lastAttackClient < cd) return;
       this.lastAttackClient = t;
@@ -2522,7 +2587,7 @@
     /** Spear-only charged thrust, released from _onLeftUp once held past
      * C.SPEAR_CHARGE_HOLD - shares the same cooldown gate as the quick jab. */
     _tryAttackCharged(targets, item) {
-      const cd = (item.cooldown || 0.35) * 1000;
+      const cd = (MC.weaponCooldown(item, this._lvl(item.key)) || 0.35) * 1000;
       const t = performance.now();
       if (t - this.lastAttackClient < cd) return;
       this.lastAttackClient = t;
@@ -2560,7 +2625,10 @@
     _pickAttackTarget() {
       const eye = [this.me.x, this.me.y + PHYS.EYE, this.me.z];
       const dir = this._lookDir();
-      const reach = C.REACH_ATTACK + 0.5;
+      // Blood Sword level 3 swings wider and further.
+      const held = ITEMS[this.me.slot];
+      const sweep = held && held.key === 'blood_sword' && this._lvl('blood_sword') >= 3;
+      const reach = C.REACH_ATTACK + 0.5 + (sweep ? MC.SHOP.BLOOD_SWEEP_REACH_BONUS : 0);
       let best = null, bestScore = -Infinity;
       for (const r of this.remote.values()) {
         if (!r.alive) continue;
@@ -2569,7 +2637,7 @@
         const dist = Math.hypot(dx, dy, dz);
         if (dist > reach) continue;
         const dot = (dx * dir[0] + dy * dir[1] + dz * dir[2]) / (dist || 1);
-        if (dot < 0.68) continue; // ~47 degree cone - forgiving but still "in front"
+        if (dot < (sweep ? MC.SHOP.BLOOD_SWEEP_COS : 0.68)) continue; // ~47 degree cone - forgiving but still "in front"
         // Don't let melee reach through a solid wall: only block if something
         // solid sits clearly closer than the target along this exact ray.
         const blockHit = this.world.raycast(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], dist - 0.4, false);
@@ -2808,6 +2876,8 @@
       const speedEff = this.activeEffects.speed, slowEff = this.activeEffects.slowness;
       let speedMult = 1;
       if (speedEff && nowMs < speedEff.until) speedMult += C.SPEED_PCT_PER_LEVEL * speedEff.level;
+      const heldItem = ITEMS[this.me.slot];
+      if (this.me.sprint && heldItem && heldItem.key === 'speed_spear' && this._lvl('speed_spear') >= 1) speedMult *= MC.SHOP.SPEED_SPEAR_SPRINT_MULT;
       if (slowEff && nowMs < slowEff.until) speedMult = Math.max(0.05, speedMult - C.SLOWNESS_PCT_PER_LEVEL * slowEff.level);
       // Swiftness, bought from the shop - multiplies whatever the potions
       // worked out to, so it stacks with Speed and is still blunted by
@@ -2907,7 +2977,7 @@
       const item = ITEMS[this.me.slot];
       if (this.mouseDown.right && (item.type === 'bow' || item.type === 'crossbow' || item.type === 'food')) {
         const held = (nowMs - this.rightDownAt) / 1000;
-        const denom = (item.type === 'bow' || item.type === 'crossbow') ? item.drawTime : item.eatTime;
+        const denom = (item.type === 'bow' || item.type === 'crossbow') ? MC.weaponDrawTime(item, this._lvl(item.key)) : item.eatTime;
         const frac = clamp(held / denom, 0, 1);
         this.hud.chargeWrap.classList.remove('hidden');
         this.hud.chargeFill.style.width = Math.round(frac * 100) + '%';
@@ -3519,7 +3589,7 @@
           if (tag) tag.node.style.display = 'none';
           continue;
         }
-        r.drawWolf(w.x, w.y, w.z, w.yaw, w.hasArmor, wolfPose(w.walkPhase || 0, w.idlePhase || 0, w.gait || 0));
+        r.drawWolf(w.x, w.y, w.z, w.yaw, w.hasArmor, wolfPose(w.walkPhase || 0, w.idlePhase || 0, w.gait || 0), w.minion ? [1.5, 0.35, 0.35] : null);
         this._drawNameTag(w);
       }
       // creepers - same fog skip, and the fuse drives a swell/flash so you
@@ -3537,6 +3607,7 @@
       }
       if (this._damageNumbers && this._damageNumbers.length) this._drawDamageNumbers();
       if ((this.groundItems && this.groundItems.length) || (this._groundNodes && this._groundNodes.size)) this._drawGroundItems();
+      if (!this._abilityAt || performance.now() - this._abilityAt > 200) { this._abilityAt = performance.now(); this._renderAbilityBar(); }
 
       // projectiles
       for (const pr of this.projectiles.values()) {

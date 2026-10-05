@@ -47,6 +47,15 @@ body { font-family: 'Segoe UI', Verdana, monospace; user-select: none; }
 
 #ammoText { position: absolute; left: 50%; bottom: 100px; transform: translateX(-50%); color: #fff; font-size: 12px; text-shadow: 1px 1px 2px #000; }
 
+/* Legendary weapons you hold: level, the key for their special move and
+   its cooldown - top centre, out of the way of the crosshair. */
+#abilityBar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: calc(100vw - 360px); pointer-events: none; }
+.abilitychip { display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.2); border-radius: 5px; padding: 3px 8px 3px 4px; color: #fff; font-size: 11px; text-shadow: 1px 1px 2px #000; white-space: nowrap; }
+.abilitychip canvas { width: 22px; height: 22px; image-rendering: pixelated; }
+.abilitychip b { color: #ffd23f; }
+.abilitychip .ready { color: #81c784; }
+.abilitychip .cooling { color: #ff8a65; }
+.abilitychip .dim { opacity: 0.65; }
 #effectsBar { position: absolute; right: 12px; top: 12px; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; pointer-events: none; }
 .effectpill { display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.45); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 3px 8px 3px 4px; color: #fff; font-size: 12px; text-shadow: 1px 1px 2px #000; }
 .effectpill b { color: #ffd23f; }

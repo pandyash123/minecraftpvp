@@ -53,7 +53,7 @@
           'hitmarker', 'arrowHit', 'effect', 'scores', 'chat', 'ammo', 'shieldStun', 'launch',
           'effects', 'weather', 'elytraUnlocked', 'legendary', 'wolfSpawn', 'wolfHp', 'wolfDeath', 'wolfTeleport', 'shopState',
           'creeperSpawn', 'creeperState', 'creeperDeath',
-          'duelInvite', 'duelStart', 'duelEnd', 'duelReturn', 'itemUnlocked', 'itemRemoved', 'groundItems',
+          'duelInvite', 'duelStart', 'duelEnd', 'duelReturn', 'itemUnlocked', 'itemRemoved', 'groundItems', 'abilityCooldown',
           // worldReset was missing here, so game.js's listener for it never
           // fired and an in-game terrain reset (or arena change) left
           // everyone still rendering the old map.
@@ -105,6 +105,7 @@
     chat(text) { if (this.socket) this.socket.emit('chat', text); }
     shopBuy(key, choice) { if (this.socket) this.socket.emit('shopBuy', key, choice); }
     dropItem(key) { if (this.socket) this.socket.emit('dropItem', key); }
+    ability() { if (this.socket) this.socket.emit('ability'); }
     summonRain() { if (this.socket) this.socket.emit('summonRain'); }
     voidPull() { if (this.socket) this.socket.emit('voidPull'); }
     duelRequest(d) { if (this.socket) this.socket.emit('duelRequest', d); }

@@ -443,6 +443,9 @@ function createGame(io, opts) {
       // Soulbound Charm: saves lastLegendary (the last legendary weapon
       // bought) through one death.
       soulbound: false, lastLegendary: null,
+      // Kills with each leveling legendary (see MC.SHOP.LEVELED), and when
+      // each weapon ability was last used.
+      weaponKills: {}, lastMinion: -1e9, lastBigBlast: -1e9, lastBleedTick: 0,
       // This life only: items bought/given on top of the kit, and items
       // dropped (see the 'dropItem' handler). Both reset on respawn.
       extraItems: new Set(), dropped: new Set(),
@@ -503,8 +506,13 @@ function createGame(io, opts) {
     p.vx = p.vy = p.vz = 0;
     // The Lifesteal Sword's extra hearts don't survive a death.
     p.bonusHealth = 0;
-    // Bought/given extras and drops only ever last one life.
+    // Totems carry over a death: however many you had (never fewer than
+    // the kit gives), and a bought/given one stays in your loadout.
+    const keptTotems = p.ammo ? (p.ammo.totem | 0) : 0;
+    const totemWasExtra = !!(p.extraItems && p.extraItems.has('totem'));
+    // Other bought/given extras and drops only ever last one life.
     p.extraItems = new Set();
+    if (totemWasExtra && keptTotems > 0) p.extraItems.add('totem');
     p.dropped = new Set();
     p.tippedTip = null;
     p.health = maxHp(p);
@@ -514,6 +522,7 @@ function createGame(io, opts) {
     p.absorption = 4;
     p.alive = true;
     p.ammo = freshAmmo();
+    p.ammo.totem = Math.max(p.ammo.totem, keptTotems);
     p.spawnAt = now();
     p.lastDamage = -99;
     p.fallFrom = null;
@@ -537,7 +546,7 @@ function createGame(io, opts) {
     // Ammo goes with it: respawn refills the pouch server-side, and without
     // sending it the client's HUD keeps showing whatever was left when you
     // died. Doubly visible now the shop's Starting Gear changes the amount.
-    if (p.socket) p.socket.emit('respawn', { x: p.x, y: p.y, z: p.z, health: p.health, absorption: p.absorption, ammo: p.ammo });
+    if (p.socket) p.socket.emit('respawn', { x: p.x, y: p.y, z: p.z, health: p.health, absorption: p.absorption, ammo: p.ammo, extras: [...p.extraItems] });
     if (p.socket) p.socket.emit('effects', {});
     io.emit('spawned', { id: p.id, x: p.x, y: p.y, z: p.z });
   }
@@ -737,7 +746,16 @@ function createGame(io, opts) {
   }
 
   // --------------------------------------------------------------- combat ---
-  function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY) {
+  /**
+   * `weapon` (optional) is the item key the hit came from - a leveling
+   * legendary gets the kill credit if this turns out to be the killing
+   * blow. Pets and minions are credited through their owner.
+   */
+  function applyDamage(victim, amount, source, cause, kbX, kbZ, kbY, weapon) {
+    if (source && victim.alive && amount > 0) {
+      const creditId = source.ownerId && !players.has(source.id) ? source.ownerId : source.id;
+      victim.lastHit = { id: creditId, weapon: weapon || null };
+    }
     // `amount <= 0` alone lets NaN through (every comparison with NaN is
     // false), and one NaN hit poisons health for good: it can never read as
     // <= 0 again, so the player is stuck "alive" at 0 hp and unkillable.
@@ -760,7 +778,7 @@ function createGame(io, opts) {
     // combat hits - fall, void and self-inflicted damage bypass armor, same
     // as vanilla.
     let blocked = false;
-    if (cause === 'sword' || cause === 'arrow' || cause === 'axe' || cause === 'mace' || cause === 'spear' || cause === 'trident' || cause === 'stick' || cause === 'tnt' || cause === 'firework' || cause === 'crystal' || cause === 'anchor' || cause === 'wolf') {
+    if (cause === 'sword' || cause === 'arrow' || cause === 'axe' || cause === 'mace' || cause === 'spear' || cause === 'trident' || cause === 'stick' || cause === 'tnt' || cause === 'firework' || cause === 'crystal' || cause === 'anchor' || cause === 'wolf' || cause === 'crossbowblast') {
       // Protection IV is always-on for bots (their fixed ARMOR_TIERS entry) but
       // an opt-in toggle for the human player (see enchants.armor.protection,
       // set at join) - build an effective tier with that swapped in rather
@@ -784,7 +802,7 @@ function createGame(io, opts) {
       // Blast Protection (netherite's blastResist, see ARMOR_TIERS): an extra
       // cut on top of the normal armor formula, only for explosive causes -
       // a dedicated resistance layer, same as vanilla's separate enchant.
-      if (!breach && tier.blastResist && (cause === 'tnt' || cause === 'firework' || cause === 'crystal' || cause === 'anchor')) {
+      if (!breach && tier.blastResist && (cause === 'tnt' || cause === 'firework' || cause === 'crystal' || cause === 'anchor' || cause === 'crossbowblast')) {
         dmg *= (1 - tier.blastResist);
       }
       const resist = activeEffect(victim, 'resistance', t);
@@ -929,6 +947,17 @@ function createGame(io, opts) {
     }
     if (source && source.id !== victim.id) {
       source.kills++;
+      // Leveling legendaries: the kill counts for the weapon that landed it.
+      const w = victim.lastHit && victim.lastHit.id === source.id ? victim.lastHit.weapon : null;
+      if (w && MC.SHOP.LEVELED[w] && source.legendary.has(w)) {
+        const before = MC.weaponLevel(source.weaponKills[w]);
+        source.weaponKills[w] = (source.weaponKills[w] | 0) + 1;
+        const after = MC.weaponLevel(source.weaponKills[w]);
+        sendLegendary(source);
+        if (after > before && source.socket) {
+          source.socket.emit('chat', { system: true, text: ITEM_BY_KEY[w].name + ' reached level ' + after + ': ' + MC.SHOP.LEVELED[w][after] + '!' });
+        }
+      }
       source.streak++;
       // reward: top up the killer a bit, classic kit-pvp style - applies to
       // bots too, not just human players (kill() doesn't distinguish source.bot).
@@ -1327,6 +1356,64 @@ function createGame(io, opts) {
     io.emit('effect', { kind: 'lightning', x, y, z });
   }
 
+  /** Explosion Crossbow blast: damages and shoves everyone in `radius`
+   * except the shooter (no block damage), and carries the arrow's tip.
+   * `pull` > 0 yanks them toward the centre instead of blowing them out. */
+  function crossbowBlast(owner, x, y, z, radius, dmg, tip, pull) {
+    const t = now();
+    for (const p of players.values()) {
+      if (!p.alive || (owner && p.id === owner.id)) continue;
+      const dx = p.x - x, dz = p.z - z, dy = (p.y + 0.9) - y;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist > radius) continue;
+      const falloff = 1 - dist / radius;
+      const l = Math.hypot(dx, dz) || 1;
+      const kb = pull ? -pull : 0.9 * falloff;
+      applyDamage(p, Math.max(1, Math.round(dmg * falloff)), owner, 'crossbowblast',
+        (dx / l) * kb, (dz / l) * kb, pull ? 0.25 : 0.4 + falloff * 0.6, 'explosion_crossbow');
+      if (p.alive && tip && tip !== 'none') applyArrowTip(p, owner, t, tip);
+    }
+    io.emit('effect', { kind: 'explosion', x, y, z, radius });
+  }
+
+  /** An Explosion Crossbow arrow landing: a normal explosive arrow, or the
+   * level-1 special - a big blast that pulls everyone in, then goes off a
+   * second time a moment later. Level 3 widens both. */
+  function arrowBlast(pr, owner, x, y, z) {
+    const lvl = owner ? weaponLevel(owner, 'explosion_crossbow') : 0;
+    const radiusMult = lvl >= 3 ? MC.SHOP.XBOW_LV3_RADIUS_MULT : 1;
+    const tip = pr.tip || (owner && owner.arrowTip);
+    if (!pr.bigBlast) {
+      crossbowBlast(owner, x, y, z, MC.SHOP.XBOW_BLAST_RADIUS * radiusMult, MC.SHOP.XBOW_BLAST_DMG, tip, 0);
+      return;
+    }
+    const r = MC.SHOP.XBOW_BIG_RADIUS * radiusMult;
+    crossbowBlast(owner, x, y, z, r, MC.SHOP.XBOW_BIG_DMG * 0.6, tip, MC.SHOP.XBOW_BIG_PULL);
+    setTimeout(() => crossbowBlast(owner, x, y, z, r, MC.SHOP.XBOW_BIG_DMG, tip, 0), MC.SHOP.XBOW_BIG_DELAY * 1000);
+  }
+
+  /** Blood Sword bleed: see the tick loop. Refreshes rather than stacks. */
+  function applyBleed(victim, attacker, t) {
+    victim.effects.bleed = { level: 1, until: t + MC.SHOP.BLEED_SECONDS, by: attacker ? attacker.id : null };
+    if (victim.socket) victim.socket.emit('effects', effectsSnapshot(victim, t));
+  }
+
+  /** Blood Sword level 2: a short-lived minion (a wolf underneath) that
+   * hunts the nearest enemy and makes them bleed. */
+  function spawnMinion(owner, t) {
+    const wolf = spawnWolf(owner, false);
+    wolf.minion = true;
+    wolf.name = owner.name + "'s Blood Minion";
+    wolf.health = wolf.maxHealth = MC.SHOP.MINION_HEALTH;
+    wolf.expires = t + MC.SHOP.MINION_SECONDS;
+    io.emit('wolfSpawn', publicWolf(wolf));
+    return wolf;
+  }
+
+  function sendCooldown(p, ability, seconds) {
+    if (p.socket) p.socket.emit('abilityCooldown', { ability, seconds });
+  }
+
   /** Magic Bow: bends an arrow's flight toward the nearest enemy within a
    * couple of blocks of it, keeping its speed - a nudge, not a lock-on. */
   function homeArrow(pr, h) {
@@ -1403,7 +1490,8 @@ function createGame(io, opts) {
               const isSelfHit = owner && hit.player.id === owner.id;
               let kbMul = isSelfHit ? C.BOW_BOOST_KB_MULT : 0.5;
               if (isBowShot && owner && hasEnchant(owner, 'bow', 'punch')) kbMul += C.PUNCH_ENCHANT_ADD;
-              applyDamage(hit.player, Math.round(dmg), owner, 'arrow', (hx / hl) * kbMul, (hz / hl) * kbMul, isSelfHit ? C.BOW_BOOST_KB_Y : 0.36);
+              applyDamage(hit.player, Math.round(dmg), owner, 'arrow', (hx / hl) * kbMul, (hz / hl) * kbMul, isSelfHit ? C.BOW_BOOST_KB_Y : 0.36, pr.weaponKey);
+              if (pr.explosive || pr.bigBlast) arrowBlast(pr, owner, nx, ny, nz, hit.player);
               // Tipped arrows land their effect on top of the hit itself -
               // but never on the shooter via a bow-boost self-hit.
               if (!isSelfHit && hit.player.alive) {
@@ -1464,6 +1552,7 @@ function createGame(io, opts) {
             const weaponItem = ITEM_BY_KEY[pr.weaponKey] || ITEM_BY_KEY.bow;
             const flameShot = pr.burning || (weaponItem.type === 'bow' && owner && hasEnchant(owner, 'bow', 'flame'));
             if (flameShot) igniteTNTBlock(Math.floor(nx), Math.floor(ny), Math.floor(nz), pr.owner);
+            if (pr.explosive || pr.bigBlast) arrowBlast(pr, owner, pr.x, pr.y, pr.z, null);
           }
           io.emit('projectileGone', { id: pr.id, x: pr.x, y: pr.y, z: pr.z, hit: true });
           removed = true;
@@ -1742,7 +1831,7 @@ function createGame(io, opts) {
   }
 
   function publicWolf(w) {
-    return { id: w.id, ownerId: w.ownerId, name: w.name, x: w.x, y: w.y, z: w.z, yaw: w.yaw, health: w.health, maxHealth: w.maxHealth, alive: w.alive, hasArmor: w.hasArmor };
+    return { id: w.id, ownerId: w.ownerId, name: w.name, x: w.x, y: w.y, z: w.z, yaw: w.yaw, health: w.health, maxHealth: w.maxHealth, alive: w.alive, hasArmor: w.hasArmor, minion: !!w.minion };
   }
 
   /** Damages a wolf - deliberately simpler than applyDamage's full armor/
@@ -1770,6 +1859,18 @@ function createGame(io, opts) {
     // A target stops being valid if it died, disconnected, is the wolf's own
     // owner (never happens through damageWolf's guard, but re-checked here in
     // case ownership context changes), or wandered out of the loyalty range.
+    // A Blood Minion only lasts so long, and goes looking for a fight on
+    // its own rather than waiting for its owner to be attacked.
+    if (wolf.minion && t >= wolf.expires) { wolves.delete(wolf.id); io.emit('wolfDeath', { id: wolf.id }); return; }
+    if (wolf.minion && !wolf.targetId) {
+      let best = null, bestD = MC.SHOP.MINION_SEEK_RANGE;
+      for (const p of players.values()) {
+        if (!p.alive || p.id === wolf.ownerId) continue;
+        const d = Math.hypot(p.x - wolf.x, p.z - wolf.z);
+        if (d < bestD) { bestD = d; best = p; }
+      }
+      if (best) wolf.targetId = best.id;
+    }
     let target = wolf.targetId ? players.get(wolf.targetId) : null;
     if (target && (!target.alive || target.id === wolf.ownerId || Math.hypot(target.x - wolf.x, target.z - wolf.z) > C.WOLF_LOYALTY_RANGE)) {
       target = null; wolf.targetId = null;
@@ -1795,7 +1896,9 @@ function createGame(io, opts) {
         // protection and the victim's-own-wolves-retaliate hook above both
         // working correctly - shieldBlocks()/withinFOV() only touch x/y/z/
         // yaw, which a wolf has same as any player.
-        applyDamage(target, C.WOLF_DAMAGE, wolf, 'wolf', (dx / l) * 0.5, (dz / l) * 0.5, 0.36);
+        applyDamage(target, wolf.minion ? MC.SHOP.MINION_DAMAGE : C.WOLF_DAMAGE, wolf, 'wolf', (dx / l) * 0.5, (dz / l) * 0.5, 0.36,
+          wolf.minion ? 'blood_sword' : undefined);
+        if (wolf.minion && target.alive) applyBleed(target, owner, t);
       }
     } else {
       // No target: follow the owner, same "close enough, just idle" rule as
@@ -2314,6 +2417,13 @@ function createGame(io, opts) {
         }
       }
       // Wither: less total damage than poison, but it will finish you off.
+      // Bleed (Blood Sword / its minion): wither-like, and it can kill -
+      // credited to whoever caused it.
+      const bleed = activeEffect(p, 'bleed', t);
+      if (bleed && t - p.lastBleedTick >= 1) {
+        p.lastBleedTick = t;
+        applyDamage(p, MC.SHOP.BLEED_DPS, players.get(bleed.by) || null, 'bleed', 0, 0, 0, 'blood_sword');
+      }
       const wither = activeEffect(p, 'wither', t);
       if (wither && t - p.lastWitherTick >= 1) {
         p.lastWitherTick = t;
@@ -2540,24 +2650,34 @@ function createGame(io, opts) {
   /** Puts legendary weapon `key` in `p`'s hands, swapping out any other
    * legendary of the same kind they held. `adminCopy` ones (the /item
    * command) are extras that don't touch the shop's stock. */
+  function sendLegendary(p) {
+    if (p.socket) p.socket.emit('legendary', { owned: [...p.legendary], kills: Object.assign({}, p.weaponKills) });
+  }
+  /** Level of a leveling legendary `p` holds, or -1 if they don't hold it. */
+  function weaponLevel(p, key) {
+    return p.legendary && p.legendary.has(key) ? MC.weaponLevel(p.weaponKills[key]) : -1;
+  }
+
   function giveLegendaryWeapon(p, key, adminCopy) {
     const base = ITEM_BY_KEY[key].base;
     for (const k of [...p.legendary]) if (ITEM_BY_KEY[k].base === base) takeLegendary(p, k, true);
     p.legendary.add(key);
+    p.weaponKills[key] = 0; // a fresh weapon starts at level 0
     if (adminCopy) p.adminLegendary.add(key);
     else legendaryOwners.set(key, { owner: ownerKey(p), name: p.name });
-    if (p.socket) p.socket.emit('legendary', { owned: [...p.legendary] });
+    if (p.socket) sendLegendary(p);
   }
 
   /** Takes legendary weapon `key` off `p`. Their shop copy goes back in
    * stock; an admin copy just disappears. */
   function takeLegendary(p, key, quiet) {
     if (!p.legendary.delete(key)) return;
+    delete p.weaponKills[key];
     if (!p.adminLegendary.delete(key)) {
       const h = legendaryOwners.get(key);
       if (h && h.owner === ownerKey(p)) legendaryOwners.delete(key);
     }
-    if (p.socket && !quiet) p.socket.emit('legendary', { owned: [...p.legendary] });
+    if (p.socket && !quiet) sendLegendary(p);
     broadcastShop();
   }
 
@@ -2571,7 +2691,7 @@ function createGame(io, opts) {
     }
     for (const k of [...p.legendary]) if (k !== kept) takeLegendary(p, k, true);
     if (p.socket) {
-      p.socket.emit('legendary', { owned: [...p.legendary] });
+      sendLegendary(p);
       if (kept) p.socket.emit('chat', { system: true, text: 'Your Soulbound Charm kept the ' + ITEM_BY_KEY[kept].name + '.' });
     }
     sendShop(p);
@@ -2584,7 +2704,7 @@ function createGame(io, opts) {
     if (!h.ground) {
       for (const p of players.values()) {
         if (ownerKey(p) !== h.owner || p.adminLegendary.has(key)) continue;
-        if (p.legendary.delete(key) && p.socket) p.socket.emit('legendary', { owned: [...p.legendary] });
+        if (p.legendary.delete(key) && p.socket) sendLegendary(p);
       }
     } else {
       broadcastGround();
@@ -2606,7 +2726,7 @@ function createGame(io, opts) {
       if (key === 'luck') { if (h.until > t) applyLuck(p, h.until); }
       else p.legendary.add(key);
     }
-    if (p.socket) p.socket.emit('legendary', { owned: [...p.legendary] });
+    if (p.socket) sendLegendary(p);
     sendGround(p);
   }
 
@@ -2890,7 +3010,8 @@ function createGame(io, opts) {
       // netherite_sword/netherite_axe behave exactly like sword/axe for every
       // enchant/armor/shield-break/looting check below - see baseWeaponKey().
       const weaponKey = baseWeaponKey(item.key);
-      const cd = item.cooldown || 0.3;
+      const level = weaponLevel(me, item.key);
+      const cd = MC.weaponCooldown(item, level) || 0.3;
       if (t - me.lastAttack < cd * 0.85) return;
       // A thrown trident isn't in hand again until it "returns" - see the
       // 'shoot' handler, which sets this based on Loyalty.
@@ -2904,7 +3025,9 @@ function createGame(io, opts) {
       // The spear pierces every valid target in front of it (up to 8), sent as
       // d.ids; every other weapon is the usual single d.id. A charged thrust
       // reaches further on top of the spear's own longer reach.
-      const reach = (item.reach || C.REACH_ATTACK) + C.REACH_ATTACK_SLACK + (charged ? C.SPEAR_CHARGE_REACH_BONUS : 0);
+      const sweep = item.key === 'blood_sword' && level >= 3;
+      const reach = (item.reach || C.REACH_ATTACK) + C.REACH_ATTACK_SLACK + (charged ? C.SPEAR_CHARGE_REACH_BONUS : 0) +
+        (sweep ? MC.SHOP.BLOOD_SWEEP_REACH_BONUS : 0);
       const minReach = item.minReach || 0;
       const rawIds = item.pierce && Array.isArray(d.ids) ? d.ids.slice(0, 8) : [d.id];
       const hits = [];
@@ -2931,6 +3054,20 @@ function createGame(io, opts) {
           if (dist <= reach && dist >= minReach) creeperHits.push(cr);
         }
       }
+      // Blood Sword level 3: the swing sweeps a wide arc, catching everyone
+      // else in front of you within reach too.
+      if (sweep) {
+        const cp = Math.cos(me.pitch);
+        const lx = -Math.sin(me.yaw) * cp, ly = Math.sin(me.pitch), lz = -Math.cos(me.yaw) * cp;
+        for (const p of players.values()) {
+          if (!p.alive || p === me || hits.includes(p) || hits.length >= 4) continue;
+          const dx = p.x - me.x, dy = (p.y + 0.9) - (me.y + MC.PHYS.EYE), dz = p.z - me.z;
+          const dist = Math.hypot(dx, dy, dz);
+          if (dist > reach || dist < 1e-3) continue;
+          if ((dx * lx + dy * ly + dz * lz) / dist < MC.SHOP.BLOOD_SWEEP_COS) continue;
+          hits.push(p);
+        }
+      }
       // Every other weapon needs an actual target to do anything; the spear's
       // Lunge fires on every swing regardless (a mobility tool as much as a
       // weapon), so only bail out here for a non-spear whiff.
@@ -2938,6 +3075,7 @@ function createGame(io, opts) {
       me.lastAttack = t;
 
       let dmg = item.damage || 1;
+      if (item.key === 'blood_sword') dmg += MC.SHOP.BLOOD_SWORD_BONUS;
       let kbMul = item.knockback || 0.5;
       // critical hit: falling and not on the ground (classic MC rule) - a mace
       // instead turns this into a smash attack, scaling with fall distance.
@@ -2976,6 +3114,9 @@ function createGame(io, opts) {
       }
       if (charged) {
         dmg *= C.SPEAR_CHARGE_DMG_MULT;
+        // Speed Spear level 3: the charged thrust and its lunge land as one
+        // combo, hitting harder still.
+        if (item.key === 'speed_spear' && level >= 3) dmg *= MC.SHOP.SPEED_SPEAR_COMBO_DMG_MULT;
         // Jousting bonus: extra damage scaled off how fast the wielder is
         // actually moving horizontally the instant the thrust lands (sprinting
         // or mid-Lunge-dash) - a charge held standing still gets none of this,
@@ -2993,8 +3134,13 @@ function createGame(io, opts) {
         const dx = victim.x - me.x, dz = victim.z - me.z;
         const l = Math.hypot(dx, dz) || 1;
         const victimDmg = dmg + (impaling && isWet(victim) ? C.TRIDENT_IMPALING_BONUS_DMG : 0);
-        applyDamage(victim, victimDmg, me, weaponKey, (dx / l) * 0.55 * kbMul, (dz / l) * 0.55 * kbMul, 0.42);
+        applyDamage(victim, victimDmg, me, weaponKey, (dx / l) * 0.55 * kbMul, (dz / l) * 0.55 * kbMul, 0.42, item.key);
         if (fireAspect) ignitePlayer(victim, t);
+        if (victim.alive && item.key === 'blood_sword' && level >= 1) applyBleed(victim, me, t);
+        if (victim.alive && item.key === 'speed_spear') {
+          victim.effects.poison = { level: 1, until: t + C.POISON_SECONDS };
+          if (victim.socket) victim.socket.emit('effects', effectsSnapshot(victim, t));
+        }
         // Cheater's Axe: the shield goes down for a while on every hit,
         // whether or not it was even raised.
         if (item.key === 'cheaters_axe' && victim.alive) stunShield(victim, t, MC.SHOP.CHEATER_STUN_SECONDS);
@@ -3019,7 +3165,8 @@ function createGame(io, opts) {
         const fx = -Math.sin(me.yaw), fz = -Math.cos(me.yaw); // yaw 0 == -Z
         let mul = C.SPEAR_LUNGE_SPEED * (me.onGround ? 1 : C.SPEAR_LUNGE_AIR_MULT);
         if (charged) mul *= C.SPEAR_CHARGE_LUNGE_MULT;
-        if (item.key === 'speed_spear') mul *= MC.SHOP.SPEED_SPEAR_LUNGE_MULT;
+        if (item.key === 'speed_spear' && level >= 2) mul *= MC.SHOP.SPEED_SPEAR_LUNGE_MULT;
+        if (item.key === 'speed_spear' && level >= 3 && charged) mul *= MC.SHOP.SPEED_SPEAR_COMBO_LUNGE_MULT;
         const lvx = fx * mul, lvz = fz * mul;
         me.vx += lvx; me.vz += lvz;
         socket.emit('launch', { vx: lvx, vz: lvz });
@@ -3112,6 +3259,33 @@ function createGame(io, opts) {
       socket.emit('itemRemoved', { key });
     });
 
+    // The Weapon ability key: whatever the held legendary can do.
+    socket.on('ability', () => {
+      if (!me || !me.alive || opts.duel) return;
+      const item = itemForPlayer(me, me.slot);
+      if (!item) return;
+      const t = now();
+      const reply = text => socket.emit('chat', { system: true, text });
+      if (item.key === 'blood_sword') {
+        if (weaponLevel(me, 'blood_sword') < 2) { reply('The Blood Sword needs level 2 to summon a minion.'); return; }
+        const left = MC.SHOP.MINION_COOLDOWN - (t - me.lastMinion);
+        if (left > 0) { sendCooldown(me, 'minion', left); return; }
+        me.lastMinion = t;
+        spawnMinion(me, t);
+        sendCooldown(me, 'minion', MC.SHOP.MINION_COOLDOWN);
+      } else if (item.key === 'explosion_crossbow') {
+        if (weaponLevel(me, 'explosion_crossbow') < 1) { reply('The Explosion Crossbow needs level 1 for its big blast.'); return; }
+        const left = MC.SHOP.XBOW_BIG_COOLDOWN - (t - me.lastBigBlast);
+        if (left > 0) { sendCooldown(me, 'bigblast', left); return; }
+        me.lastBigBlast = t;
+        const cp = Math.cos(me.pitch);
+        const dir = [-Math.sin(me.yaw) * cp, Math.sin(me.pitch), -Math.cos(me.yaw) * cp];
+        spawnProjectile(me, 'arrow', me.x, me.y + MC.PHYS.EYE, me.z, dir[0], dir[1], dir[2], 1,
+          { weaponKey: 'explosion_crossbow', bigBlast: true, tip: me.arrowTip });
+        sendCooldown(me, 'bigblast', MC.SHOP.XBOW_BIG_COOLDOWN);
+      }
+    });
+
     // Trident of the Sea: call the rain down (which also lets Riptide fire).
     socket.on('summonRain', () => {
       if (!me || !me.alive || opts.duel || !me.legendary.has('sea_trident')) return;
@@ -3121,6 +3295,7 @@ function createGame(io, opts) {
         return;
       }
       me.lastRainCall = t;
+      sendCooldown(me, 'rain', MC.SHOP.SEA_RAIN_COOLDOWN);
       if (weather === 'clear') weather = 'rain';
       weatherUntil = Math.max(weatherUntil, t + MC.SHOP.SEA_RAIN_SECONDS);
       io.emit('weather', { kind: weather });
@@ -3148,6 +3323,7 @@ function createGame(io, opts) {
       }
       if (!best) return;
       me.lastVoidPull = t;
+      sendCooldown(me, 'pull', MC.SHOP.VOID_PULL_COOLDOWN);
       const hx = me.x - best.x, hz = me.z - best.z, hl = Math.hypot(hx, hz) || 1;
       const vx = hx / hl * MC.SHOP.VOID_PULL_SPEED, vz = hz / hl * MC.SHOP.VOID_PULL_SPEED, vy = 3;
       best.vx += vx; best.vz += vz; best.vy = Math.max(best.vy, vy);
@@ -3190,7 +3366,8 @@ function createGame(io, opts) {
           const off = (i - (n - 1) / 2) * spread;
           const cosA = Math.cos(off), sinA = Math.sin(off);
           const ndx = dir[0] * cosA - dir[2] * sinA, ndz = dir[0] * sinA + dir[2] * cosA;
-          spawnProjectile(me, 'arrow', me.x, me.y + MC.PHYS.EYE, me.z, ndx, dir[1], ndz, power, { weaponKey: 'crossbow', tip });
+          spawnProjectile(me, 'arrow', me.x, me.y + MC.PHYS.EYE, me.z, ndx, dir[1], ndz, power,
+            { weaponKey: item.key, tip, explosive: item.key === 'explosion_crossbow' });
         }
         socket.emit('ammo', me.ammo);
       } else if (item.throwable) {

@@ -376,7 +376,11 @@
     { key: 'magic_bow', name: 'Magic Bow', type: 'bow', base: 'bow', legendary: true, maxDamage: 10, minDamage: 2, drawTime: 1.0, mineSpeed: 0.3 },
     { key: 'sea_trident', name: 'Trident of the Sea', type: 'weapon', base: 'trident', legendary: true, damage: 8, cooldown: 0.9, knockback: 1.1, mineSpeed: 0.4, throwable: true },
     { key: 'cheaters_axe', name: "Cheater's Axe", type: 'weapon', base: 'axe', legendary: true, damage: 10, cooldown: 0.9, knockback: 1.3, mineSpeed: 0.5 },
-    { key: 'speed_spear', name: 'Speed Spear', type: 'weapon', base: 'spear', legendary: true, damage: 7, cooldown: 1.1, knockback: 0.9, mineSpeed: 0.4, reach: 4.5, minReach: 1.2, pierce: true },
+    // Levels up with kills (see SHOP.LEVELED) - its cooldown and lunge
+    // improve at level 2, see weaponCooldown().
+    { key: 'speed_spear', name: 'Speed Spear', type: 'weapon', base: 'spear', legendary: true, damage: 8, cooldown: 1.6, knockback: 0.9, mineSpeed: 0.4, reach: 4.5, minReach: 1.2, pierce: true },
+    { key: 'blood_sword', name: 'Blood Sword', type: 'weapon', base: 'sword', legendary: true, damage: 8, cooldown: 0.42, knockback: 1.0, mineSpeed: 0.4 },
+    { key: 'explosion_crossbow', name: 'Explosion Crossbow', type: 'crossbow', base: 'crossbow', legendary: true, maxDamage: 11, minDamage: 5, drawTime: 0.5, mineSpeed: 0.3 },
     { key: 'void_mace', name: 'Void Mace', type: 'weapon', base: 'mace', legendary: true, damage: 7, cooldown: 0.9, knockback: 1.2, mineSpeed: 0.4 }
   ];
   var ITEM_INDEX = {};
@@ -488,6 +492,22 @@
     }
     if (density) dmg += fallDist * C.MACE_DENSITY_PER_BLOCK;
     return dmg;
+  }
+
+  /** A leveling weapon's level from its kill count (0..MAX_WEAPON_LEVEL). */
+  function weaponLevel(kills) {
+    return Math.max(0, Math.min(SHOP.MAX_WEAPON_LEVEL, kills | 0));
+  }
+  /** Attack cooldown, allowing for the Speed Spear's level-2 upgrade. */
+  function weaponCooldown(item, level) {
+    if (item.key === 'speed_spear' && level >= 2) return SHOP.SPEED_SPEAR_FAST_COOLDOWN;
+    return item.cooldown;
+  }
+  /** Bow/crossbow draw time, allowing for the Explosion Crossbow's level-2
+   * faster charge. */
+  function weaponDrawTime(item, level) {
+    if (item.key === 'explosion_crossbow' && level >= 2) return item.drawTime * SHOP.XBOW_LV2_DRAW_MULT;
+    return item.drawTime;
   }
 
   function findItem(query) {
@@ -717,9 +737,44 @@
     SEA_CHANNELING_BURN_SECONDS: 10,
     SEA_RAIN_SECONDS: 60,
     SEA_RAIN_COOLDOWN: 90,
+    // Weapons that level up: every kill made with one (its bleed, minion or
+    // explosions included) raises its level, up to MAX_WEAPON_LEVEL. Each
+    // level keeps the ones before it. Lost along with the weapon.
+    MAX_WEAPON_LEVEL: 3,
+    LEVELED: {
+      blood_sword: ['+2 damage', 'Hits make enemies bleed', 'Weapon ability: summon a Blood Minion', 'Wider, longer-reaching swings'],
+      speed_spear: ['Hits poison', 'Faster sprinting while held', 'Longer lunge, shorter cooldown', 'Charged thrust + lunge combo, extra damage'],
+      explosion_crossbow: ['Explosive arrows', 'Weapon ability: double-blast that pulls enemies in', 'Faster charging', 'Bigger explosions']
+    },
+    // Blood Sword.
+    BLOOD_SWORD_BONUS: 2,
+    BLEED_SECONDS: 6,
+    BLEED_DPS: 1,               // 6 damage (3 hearts) over BLEED_SECONDS
+    BLOOD_SWEEP_REACH_BONUS: 1.5,
+    BLOOD_SWEEP_COS: 0.5,       // extra targets within ~60 degrees of your aim
+    MINION_HEALTH: 10,
+    MINION_DAMAGE: 3,
+    MINION_SECONDS: 30,
+    MINION_COOLDOWN: 30,
+    MINION_SEEK_RANGE: 16,
+    // Speed Spear.
+    SPEED_SPEAR_SPRINT_MULT: 1.25,
+    SPEED_SPEAR_FAST_COOLDOWN: 1.1,
+    SPEED_SPEAR_COMBO_DMG_MULT: 1.4,
+    SPEED_SPEAR_COMBO_LUNGE_MULT: 1.3,
+    // Explosion Crossbow.
+    XBOW_BLAST_RADIUS: 2.5,
+    XBOW_BLAST_DMG: 5,
+    XBOW_BIG_RADIUS: 4.5,
+    XBOW_BIG_DMG: 9,
+    XBOW_BIG_PULL: 1.3,
+    XBOW_BIG_DELAY: 0.7,
+    XBOW_BIG_COOLDOWN: 20,
+    XBOW_LV3_RADIUS_MULT: 1.5,
+    XBOW_LV2_DRAW_MULT: 0.5,
     // Cheater's Axe: every hit locks the target's shield this long.
     CHEATER_STUN_SECONDS: 5,
-    // Speed Spear: a longer lunge on top of its shorter cooldown (ITEMS).
+    // Speed Spear (level 2+): a longer lunge on top of its shorter cooldown.
     SPEED_SPEAR_LUNGE_MULT: 1.5,
     // Void Mace.
     VOID_MACE_SMASH_MULT: 1.75,
@@ -744,7 +799,9 @@
       { key: 'magic_bow', item: 'magic_bow', name: 'Magic Bow', value: 4, desc: 'Replaces your bow. Arrows carry every debuff and home in slightly.' },
       { key: 'sea_trident', item: 'sea_trident', name: 'Trident of the Sea', value: 3, desc: 'Riptide gives Speed, Channeling sets targets alight for 10s, V summons rain.' },
       { key: 'cheaters_axe', item: 'cheaters_axe', name: "Cheater's Axe", value: 4, desc: 'Replaces your axe. Every hit disables their shield for 5s, raised or not.' },
-      { key: 'speed_spear', item: 'speed_spear', name: 'Speed Spear', value: 5, desc: 'Replaces your spear. Faster attacks, shorter cooldown, longer lunge.' },
+      { key: 'speed_spear', item: 'speed_spear', name: 'Speed Spear', value: 7, desc: 'Replaces your spear (netherite strength). Levels up with kills.' },
+      { key: 'blood_sword', item: 'blood_sword', name: 'Blood Sword', value: 8, desc: 'Replaces your sword. Levels up with kills.' },
+      { key: 'explosion_crossbow', item: 'explosion_crossbow', name: 'Explosion Crossbow', value: 8, desc: 'Replaces your crossbow. Levels up with kills.' },
       { key: 'void_mace', item: 'void_mace', name: 'Void Mace', value: 8, desc: 'Replaces your mace. Hits far harder; right-click pulls enemies toward you.' },
       { key: 'soulbound', name: 'Soulbound Charm', value: 4, unlimited: true, desc: 'The last legendary weapon you bought survives your next death. Used up after one.' }
     ],
@@ -1268,6 +1325,9 @@
     SHOP: SHOP,
     baseKey: baseKey,
     findItem: findItem,
+    weaponLevel: weaponLevel,
+    weaponCooldown: weaponCooldown,
+    weaponDrawTime: weaponDrawTime,
     COMBAT: COMBAT,
     PHYS: PHYS,
     breakTime: breakTime,
